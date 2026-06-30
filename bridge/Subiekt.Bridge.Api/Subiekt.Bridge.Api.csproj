@@ -1,0 +1,53 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <!-- Keep the legacy code namespaces (SferaApi, SferaApi.Services, SferaApi.Models)
+         to avoid a mass namespace rename in this structural phase, while shipping the
+         assembly under the new hexagonal name. -->
+    <RootNamespace>SferaApi</RootNamespace>
+    <AssemblyName>Subiekt.Bridge.Api</AssemblyName>
+    <PlatformTarget>x64</PlatformTarget>
+    <UseWPF>true</UseWPF>
+    <!-- The legacy Api code moved here builds without warnings-as-errors and is
+         grandfathered for now: it emits nullable (CS8600/8601/8602/8603/8604/8618/
+         8619/8625), unused (CS0168/CS0219), unawaited-task (CS4014) and member-hiding
+         (CS0114) warnings not covered by the inherited WarningsNotAsErrors allowlist.
+         This override is intentionally scoped to this project only — warnings-as-errors
+         stays enforced on the new Domain/Application/Infrastructure projects via
+         bridge/Directory.Build.props. Remove this once the legacy Api is carved into
+         adapters in a later phase. -->
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <!-- $(SferaBinaries) default lives in bridge/Directory.Build.props and is overridable. -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="InsERT.Moria.Sfera">
+      <HintPath>$(SferaBinaries)\InsERT.Moria.Sfera.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="InsERT.Moria.API">
+      <HintPath>$(SferaBinaries)\InsERT.Moria.API.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Swashbuckle.AspNetCore" Version="6.6.2" />
+    <PackageReference Include="FluentValidation" Version="11.9.2" />
+    <!-- Retained: POST /api/przyjecie (StockEndpoints) still talks to the Sfera
+         session's SqlConnection (s.Uchwyt.PodajPolaczenie()), so the Api binds to
+         this assembly at compile time. All typed reads moved to the 3A read-models
+         (Infrastructure.Sql); no inline SqlConnection/SqlList remains in Api source. -->
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="5.1.5" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Subiekt.Bridge.Domain\Subiekt.Bridge.Domain.csproj" />
+    <ProjectReference Include="..\Subiekt.Bridge.Application\Subiekt.Bridge.Application.csproj" />
+    <ProjectReference Include="..\Subiekt.Bridge.Infrastructure.Sfera\Subiekt.Bridge.Infrastructure.Sfera.csproj" />
+    <ProjectReference Include="..\Subiekt.Bridge.Infrastructure.Sql\Subiekt.Bridge.Infrastructure.Sql.csproj" />
+    <ProjectReference Include="..\Subiekt.Bridge.Infrastructure.Persistence\Subiekt.Bridge.Infrastructure.Persistence.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,49 @@
+# Bridge (.NET)
+bin/
+obj/
+bridge/**/bin/
+bridge/**/obj/
+bridge/Subiekt.Bridge.Api/appsettings.json
+# Machine-local dev config (Sfera paths + nexo user); secrets still via env/user-secrets.
+bridge/Subiekt.Bridge.Api/appsettings.Development.json
+bridge/.vs/
+bridge/.vscode/
+bridge/*.user
+
+# Cockpit (Node)
+cockpit/node_modules/
+cockpit/dist/
+cockpit/build/
+cockpit/.env
+cockpit/.env.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+
+# Runtime/test artifacts
+bridge/Subiekt.Bridge.Api/idempotency-store.json
+bridge/Subiekt.Bridge.Api/audit-log.db
+bridge/Subiekt.Bridge.Api/audit-log.db-*
+bridge/tools/SferaInspect/sfera-dump.txt
+
+# TLS certs (NEVER commit) + local launch helpers
+*.pfx
+*.pem
+bridge/Subiekt.Bridge.Api/launch-https.ps1
+bridge/Subiekt.Bridge.Api/kill-bridge.ps1
+
+# Windows transfer artifacts (NTFS alternate data streams)
+*Zone.Identifier
+scratchpad/
+bridge-https.log.err

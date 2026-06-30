@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <PlatformTarget>x64</PlatformTarget>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Dapper" Version="2.1.35" />
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="5.1.5" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Subiekt.Bridge.Application\Subiekt.Bridge.Application.csproj" />
+    <ProjectReference Include="..\Subiekt.Bridge.Domain\Subiekt.Bridge.Domain.csproj" />
+  </ItemGroup>
+
+</Project>

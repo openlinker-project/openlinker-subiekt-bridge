@@ -1,0 +1,29 @@
+<Project>
+
+  <!-- Common build settings applied to every project under bridge/. -->
+  <PropertyGroup>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+
+    <!-- Concession for the transitional phase: the legacy Api code is heavily
+         reflection-based (Sfera) and may surface warnings that we do not want to
+         block the Windows build on while the hexagon is still being carved out.
+         Keep this list small and revisit per phase.
+         - CS1591: missing XML doc comment (we do not require docs yet)
+         - CS0618 / CS0612: obsolete API usage (some Sfera/SqlClient members)
+         - CS8002: referenced assembly not strong-named (Sfera DLLs) -->
+    <WarningsNotAsErrors>CS1591;CS0618;CS0612;CS8002</WarningsNotAsErrors>
+  </PropertyGroup>
+
+  <!-- Location of the InsERT/Sfera Binaries directory used for assembly HintPaths.
+       Default points at the original developer machine so the Windows build keeps
+       working out of the box. Override per machine via an environment variable
+       (set SferaBinaries=...) or by defining the property earlier (e.g. in a
+       Directory.Build.props closer to a project, or on the msbuild command line). -->
+  <PropertyGroup Condition="'$(SferaBinaries)' == ''">
+    <SferaBinaries>C:\Users\42zer\AppData\Local\InsERT\Deployments\Nexo\Demo_1269000381e084a6bb1f8d36d8c\Binaries</SferaBinaries>
+  </PropertyGroup>
+
+</Project>

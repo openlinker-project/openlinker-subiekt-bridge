@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Must match the windows-targeted projects (Api, Infrastructure.Sfera/Sql)
+         this project references. -->
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <PlatformTarget>x64</PlatformTarget>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.10.0" />
+    <PackageReference Include="xunit" Version="2.9.0" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="NetArchTest.Rules" Version="1.3.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\Subiekt.Bridge.Domain\Subiekt.Bridge.Domain.csproj" />
+    <ProjectReference Include="..\..\Subiekt.Bridge.Application\Subiekt.Bridge.Application.csproj" />
+    <ProjectReference Include="..\..\Subiekt.Bridge.Infrastructure.Sfera\Subiekt.Bridge.Infrastructure.Sfera.csproj" />
+    <ProjectReference Include="..\..\Subiekt.Bridge.Infrastructure.Sql\Subiekt.Bridge.Infrastructure.Sql.csproj" />
+    <ProjectReference Include="..\..\Subiekt.Bridge.Infrastructure.Persistence\Subiekt.Bridge.Infrastructure.Persistence.csproj" />
+    <ProjectReference Include="..\..\Subiekt.Bridge.Api\Subiekt.Bridge.Api.csproj" />
+  </ItemGroup>
+
+</Project>

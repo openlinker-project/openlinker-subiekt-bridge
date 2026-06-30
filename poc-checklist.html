@@ -1,0 +1,343 @@
+<!doctype html><html><head>
+<meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1">
+<title>Subiekt POC — checklista akceptacyjna przed integracją z OpenLinker</title>
+<style>
+  :root{
+    --bg:#0f1419;--panel:#171d26;--panel2:#1d2530;--ink:#e6edf3;--muted:#8b98a8;
+    --line:#2a3340;--p0:#ff5c5c;--p1:#ffb454;--p2:#5cc8ff;--ok:#3fd07f;--accent:#7c9eff;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+  .wrap{max-width:1000px;margin:0 auto;padding:32px 20px 80px}
+  h1{font-size:26px;line-height:1.25;margin:0 0 6px}
+  .sub{color:var(--muted);margin:0 0 22px;font-size:14px}
+  .box{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px 18px;margin:0 0 16px}
+  .box.note{border-left:3px solid var(--accent)}
+  .box.warn{border-left:3px solid var(--p0)}
+  .box.run{border-left:3px solid var(--ok)}
+  h2{font-size:18px;margin:30px 0 12px;padding-bottom:6px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+  h2 .n{color:var(--accent);font-variant-numeric:tabular-nums}
+  .tag{font-size:11px;font-weight:700;padding:2px 7px;border-radius:5px;letter-spacing:.3px;white-space:nowrap}
+  .p0{background:rgba(255,92,92,.16);color:var(--p0)}
+  .p1{background:rgba(255,180,84,.16);color:var(--p1)}
+  .p2{background:rgba(92,200,255,.14);color:var(--p2)}
+  .iss{font-size:11px;font-weight:700;padding:2px 7px;border-radius:5px;white-space:nowrap;background:rgba(124,158,255,.14);color:var(--accent);border:1px solid rgba(124,158,255,.25)}
+  h2 .right{margin-left:auto;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+  .item{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:13px 15px;margin:0 0 9px;display:grid;grid-template-columns:22px 1fr;gap:12px}
+  .item .cb{width:18px;height:18px;border:2px solid var(--line);border-radius:5px;margin-top:2px;position:relative}
+  .item .cb.done{background:var(--ok);border-color:var(--ok)}
+  .item .cb.done::after{content:"✓";position:absolute;top:-3px;left:2px;color:#0f1419;font-size:14px;font-weight:800}
+  .item .cb.part{background:var(--p1);border-color:var(--p1)}
+  .item .cb.part::after{content:"–";position:absolute;top:-5px;left:4px;color:#0f1419;font-size:15px;font-weight:800}
+  .item h3{margin:0 0 4px;font-size:14.5px;font-weight:650}
+  .item p{margin:3px 0;font-size:13.5px;color:#c7d1dc}
+  .item .exp{color:var(--ok)}
+  .item .why{color:var(--muted);font-size:12.5px;font-style:italic}
+  .vd{display:inline-block;font-size:10.5px;font-weight:700;padding:1px 7px;border-radius:4px;margin-left:6px;vertical-align:middle}
+  .vd.ok{background:rgba(63,208,127,.16);color:var(--ok)}
+  .vd.part{background:rgba(255,180,84,.16);color:var(--p1)}
+  .vd.todo{background:rgba(139,152,168,.16);color:var(--muted)}
+  .res{margin:5px 0 0;font-size:12.5px;color:var(--ok)}
+  .res.amber{color:var(--p1)}
+  code{background:var(--panel2);border:1px solid var(--line);border-radius:4px;padding:1px 5px;font-size:12.5px;font-family:"SF Mono",ui-monospace,Menlo,Consolas,monospace}
+  ul.tight{margin:4px 0 0;padding-left:18px}
+  ul.tight li{margin:2px 0;font-size:13px;color:#c7d1dc}
+  .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12.5px;color:var(--muted);margin-top:8px}
+  .legend b{color:var(--ink)}
+  .scope{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:680px){.scope{grid-template-columns:1fr}}
+  .scope .col{background:var(--panel);border:1px solid var(--line);border-radius:9px;padding:14px 16px}
+  .scope h4{margin:0 0 8px;font-size:14px}
+  .scope.in h4{color:var(--ok)} .scope .out h4{color:var(--muted)}
+  strong.k{color:#fff}
+  .flow{counter-reset:s;list-style:none;padding:0;margin:6px 0 0}
+  .flow li{position:relative;padding:8px 0 8px 38px;border-bottom:1px dashed var(--line);font-size:13.5px}
+  .flow li:last-child{border-bottom:0}
+  .flow li::before{counter-increment:s;content:counter(s);position:absolute;left:0;top:7px;width:24px;height:24px;background:var(--panel2);border:1px solid var(--line);border-radius:50%;text-align:center;line-height:23px;font-size:12px;color:var(--accent);font-weight:700}
+  .bar{display:flex;gap:18px;flex-wrap:wrap;margin-top:10px;font-size:13px}
+  .bar b{color:var(--ink)}
+</style>
+</head><body>
+
+<div class="wrap">
+<h1>Subiekt POC — checklista akceptacyjna przed integracją z OpenLinker</h1>
+<p class="sub">Co musi być w POC i potwierdzone (działa / nie działa) zanim ruszymy z realną integracją. Ułożone jak prawdziwy przebieg e-commerce: zamówienie → kontrahent → dokument → KSeF → magazyn. Stan na 2026-06-18.</p>
+
+<div class="box run">
+<strong class="k">✅ Przebieg testowy — 2026-06-19 (na żywo, Nexo_Demo_1, Sfera).</strong> Bridge dorobiony i odpalony; auto-connect OK. Zweryfikowano empirycznie zapis przez Sferę. Legenda odznaczeń:
+<div class="bar">
+<span><span class="vd ok">✓ działa</span> potwierdzone na żywo</span>
+<span><span class="vd part">– częściowo</span> rdzeń działa, reszta blokowana środowiskiem / nietestowana</span>
+<span><span class="vd todo">TODO</span> jeszcze nieweryfikowane</span>
+</div>
+<div class="bar">
+<span><b>Faktura:</b> FS 27–30 CENTRALA/2026</span><span><b>Paragon:</b> PA 2/2026</span><span><b>Magazyn:</b> 71→66 (auto-zdjęcie)</span><span><b>Towar spoza Subiekta:</b> FS 30 (pozycja jednorazowa) ✓</span><span><b>Auth:</b> 401/OK ✓</span><span><b>SQL-down:</b> subiekt:down ✓</span><span><b>KSeF map:</b> 5/5 ✓</span><span><b>Korekta:</b> zwrot ZW 1 ✓</span><span><b>E2E:</b> pełne zamówienie ✓</span><span><b>Deploy:</b> szablon prod ✓</span>
+</div>
+</div>
+
+<div class="box note">
+<strong class="k">Po co ten POC.</strong> POC = <strong>bridge (Windows .NET) + harness</strong>. Jego jedyne zadanie: udowodnić, że <strong>cała strona Subiekt/Sfera działa</strong>, tak że gdy OpenLinker się podłączy, jedyną pozostałą robotą będzie wiring po stronie OL.
+<div class="legend">
+<span><span class="tag p0">P0</span> <b>blokujące</b></span>
+<span><span class="tag p1">P1</span> <b>potrzebne</b></span>
+<span><span class="tag p2">P2</span> <b>do udokumentowania / decyzji</b></span>
+</div>
+</div>
+
+<!-- 0 -->
+<h2><span class="n">0.</span> Połączenie, sesja, dostęp <span class="right"><span class="iss">#752</span><span class="tag p0">P0</span></span></h2>
+
+<div class="item"><div class="cb done"></div><div>
+<h3>/health rozróżnia trzy stany <span class="vd ok">✓ działa</span></h3>
+<p class="exp">Oczekiwane: zwraca osobno „bridge up" + „sesja Sfery ważna" + „Subiekt osiągalny".</p>
+<p class="res">Wszystkie 3 potwierdzone na żywo: (a) zdrowo <code>{ok, bridge:up, sferaSession:valid, subiekt:reachable}</code>; (b) <strong>zatrzymana usługa SQL</strong> → <code>{sfera_session_invalid, subiekt:down, subiektError:"not connected"}</code> w <strong>2 s</strong>; (c) złe credentiale Sfery → <code>{sfera_session_invalid, subiekt:down}</code>. Dodano fail-fast probe (<code>CommandTimeout=3</code> + <code>Monitor.TryEnter</code>), by health nie wisiał na martwym SQL.</p>
+</div></div>
+
+<div class="item"><div class="cb part"></div><div>
+<h3>Dostęp z innej maszyny (NIE localhost) <span class="vd part">– bind ✓</span></h3>
+<p>Akcja: <code>curl http://IP_WINDOWSA:5005/health</code> z innego hosta w LAN.</p>
+<p class="res">Bridge nasłuchuje na <code>0.0.0.0:5005</code> + CORS LAN. Potwierdzone: <code>/health</code> po adresie nie-loopback (172.26.96.1) odpowiada — bind przyjmuje połączenia spoza localhost. Pozostaje tylko test z fizycznie drugiej maszyny + reguła firewalla.</p>
+</div></div>
+
+<div class="item"><div class="cb done"></div><div>
+<h3>Autoryzacja OL ↔ bridge <span class="vd ok">✓ działa</span></h3>
+<p class="res">Potwierdzone (przy <code>Auth:Enabled=true</code>): zapis bez <code>X-Api-Key</code> → <code>401 unauthorized</code>; z kluczem → OK (id=101129); odczyty (<code>/health</code>, GET) otwarte. Domyślnie wyłączone, by cockpit/demo działał bez klucza.</p>
+</div></div>
+
+<div class="item"><div class="cb done"></div><div>
+<h3>Cykl życia sesji Sfery <span class="vd ok">✓ działa</span></h3>
+<p class="res">Auto-connect na starcie ✓. <strong>Auto-relogin</strong> ✓ — w tym <em>w trakcie operacji</em>: zapis trwający podczas zatrzymania SQL dokończył się sukcesem (FS 36), gdy SQL wrócił, bez błędu dla wołającego. <strong>Współbieżność</strong> ✓: równoległe wystawienia → FS 33/34, różne sekwencyjne numery (<code>SyncRoot</code> serializuje). Wygaśnięcie „na noc" nietestowane (czas), ale obsłużone przez <code>EnsureConnected</code>+probe.</p>
+</div></div>
+
+<div class="item"><div class="cb done"></div><div>
+<h3>Decyzja: model połączenia <span class="vd ok">✓ działa</span></h3>
+<p>Akcja: rozstrzygnij auto-connect vs ręczny; credentiale per-request vs appsettings.</p>
+<p class="res">Decyzja: <strong>auto-connect na starcie + credentiale z appsettings</strong> (HostedService). Ręczny <code>POST /api/sfera/connect</code> zostaje jako fallback. Zgodne z „most już połączony". Potwierdzone na żywo.</p>
+</div></div>
+
+<!-- 1 -->
+<h2><span class="n">1.</span> Faktura VAT (B2B, z NIP) — REALNIE przez Sferę <span class="right"><span class="iss">#755</span><span class="tag p0">P0</span></span></h2>
+
+<div class="item"><div class="cb done"></div><div>
+<h3>Faktura tworzy się i zatwierdza w Subiekcie <span class="vd ok">✓ działa</span></h3>
+<p class="res">Wynik: <code>FS 27/CENTRALA/2026</code> — zatwierdzona (pełny numer nadany), nabywca podpięty. Przez <code>UtworzFaktureSprzedazy</code> → <code>Zapisz</code>.</p>
+</div></div>
+
+<div class="item"><div class="cb done"></div><div>
+<h3>Wielopozycyjna, mieszane stawki VAT <span class="vd ok">✓ działa</span></h3>
+<p class="res">Wynik: 2 poz. (23% + 8%) → netto 52,20 / VAT 8,81 / brutto 61,01 — sumy się zgadzają. <code>taxRate</code> mapuje na <code>StawkiVat.Id</code>.</p>
+</div></div>
+
+<div class="item"><div class="cb done"></div><div>
+<h3>Liczenie od ceny BRUTTO <span class="vd ok">✓ działa</span></h3>
+<p class="res">Wynik: <code>cenaBrutto</code> z requestu zastosowana na pozycji (<code>CenaRecznieEdytowana</code> + <code>Cena.Brutto*</code>), <code>Przelicz</code> rozbija netto/VAT. Brutto dokumentu = suma cen brutto.</p>
+</div></div>
+
+<div class="item"><div class="cb done"></div><div>
+<h3>Numeracja i identyfikatory <span class="vd ok">✓ działa</span></h3>
+<p class="res">Wynik: numery sekwencyjne nadane przez Subiekt (FS 27→28→29). Zwracane osobno <code>providerInvoiceId</code> (100161) i <code>providerInvoiceNumber</code> („FS 27/CENTRALA/2026").</p>
+</div></div>
+
+<div class="item"><div class="cb done"></div><div>
+<h3>PDF / link do dokumentu <span class="vd ok">✓ decyzja</span></h3>
+<p class="res">Sfera nie udostępnia <code>pdfUrl</code> w tym POC → zwracamy świadomie <code>pdfUrl: null</code> (udokumentowane).</p>
+</div></div>
+
+<div class="item"><div class="cb done"></div><div>
+<h3>Rollback przy błędzie <span class="vd ok">✓ działa</span></h3>
+<p class="res">Potwierdzone: nieistniejący kontrahent → <code>422 rejected</code> („Kontrahent ID … not found") — błąd przed utworzeniem dokumentu, <strong>zero śmiecia w buforze</strong>. (Wcześniej testowane też przez sprzedaż &gt; stan, ale ta teraz świadomie przechodzi — patrz sekcja 7.)</p>
+</div></div>
+
+<div class="item"><div class="cb part"></div><div>
+<h3>Waluta <span class="vd ok">✓ decyzja v1</span></h3>
+<p class="res">Potwierdzone: PLN działa. EUR przetestowane (FS 124) — <code>currency</code> jest echowane, ale dokument księguje się w <strong>PLN</strong> (waluta nieaplikowana). Decyzja v1 = PLN-only; nie-PLN = wiring <code>ObslugaWaluty</code> w v2.</p>
+</div></div>
+
+<!-- 2 -->
+<h2><span class="n">2.</span> Paragon (B2C, bez NIP) <span class="right"><span class="iss">#755 + research</span><span class="tag p0">P0</span></span></h2>
+
+<div class="item"><div class="cb done"></div><div>
+<h3>Paragon przez Sferę <span class="vd ok">✓ działa</span></h3>
+<p class="res">Wynik: <code>PA 2/CENTRALA/2026</code> przez <code>UtworzParagon</code>.</p>
+</div></div>
+
+<div class="item"><div class="cb done"></div><div>
+<h3>Zachowanie bez drukarki fiskalnej <span class="vd ok">✓ decyzja</span></h3>
+<p class="res">Wynik: paragon <strong>niefiskalny</strong> (<code>UtworzParagon</code>) tworzy się <strong>bez drukarki fiskalnej</strong>. Fiskalizacja (<code>UtworzParagonFiskalny</code>) wymagałaby drukarki. Polityka v1: paragon niefiskalny / decyzja per-wdrożenie.</p>
+</div></div>
+
+<div class="item"><div class="cb done"></div><div>
+<h3>Paragon NIE idzie do KSeF <span class="vd ok">✓ działa</span></h3>
+<p class="res">Wynik: <code>regulatoryStatus = none</code> dla paragonu.</p>
+</div></div>
+
+<!-- 3 -->
+<h2><span class="n">3.</span> KSeF — pełny async E2E <span class="right"><span class="iss">#755 + research</span><span class="tag p0">P0</span></span></h2>
+<div class="box note"><strong class="k">Zakres mostu vs środowisko.</strong> Most <strong>tylko odczytuje i mapuje</strong> stan KSeF — transmisję robi Subiekt (poza mostem). Mapowanie zweryfikowane <strong>w pełni</strong>: wstrzykując realne sygnały KSeF do bazy dokumentu testowego (FS 32) przeszedłem wszystkie 5 stanów. Sama <em>transmisja</em> do KSeF jest na demo wyłączona (brak sandboxa) — to jedyne, co wymaga instancji z KSeF.</div>
+
+<div class="item"><div class="cb part"></div><div>
+<h3>Subiekt skonfigurowany na auto-wysyłkę KSeF <span class="vd part">blocker: KSeF env</span></h3>
+<p class="res">To konfiguracja Subiekta (Parametry KSeF → „Generuj e-Faktury: Automatycznie przy zapisie"), nie mostu. Demo `Nexo_Demo_1` nie ma KSeF. <strong>Kryterium domknięcia:</strong> instancja z KSeF (sandbox/prod) → ustawić auto-wysyłkę → most odczyta `sent`/`accepted`. Mapowanie po stronie mostu już potwierdzone (5/5).</p>
+</div></div>
+
+<div class="item"><div class="cb done"></div><div>
+<h3>Odczyt statusu — i jego zmiana w czasie <span class="vd ok">✓ działa</span></h3>
+<p class="res">Odczyt działa (netto/VAT/brutto + KSeF). Przejścia stanów potwierdzone na FS 32 przez wstrzyknięcie sygnałów do bazy: <strong>pending → sent → accepted</strong>. Wystawienie nie blokuje na KSeF. Polling w cockpicie dorobiony.</p>
+</div></div>
+
+<div class="item"><div class="cb done"></div><div>
+<h3>Mapowanie stanów na 5 wartości kontraktu <span class="vd ok">✓ wszystkie 5</span></h3>
+<p class="res">Zweryfikowane wszystkie: <code>none</code> (paragon) · <code>pending</code> · <code>sent</code> (<code>DataWystawieniaNadanaPrzezKSEF</code>) · <code>accepted</code> (<code>NumeryKSeFDokumentow.Numer</code> → <code>clearanceReference</code>=KSEF_ID) · <code>rejected</code> (<code>DokumentHandlowy_AwariaKSeFId</code>).</p>
+</div></div>
+
+<div class="item"><div class="cb done"></div><div>
+<h3>Odrzucenie przez KSeF (rejected) <span class="vd ok">✓ działa</span></h3>
+<p class="res">Potwierdzone: ustawienie <code>DokumentHandlowy_AwariaKSeFId</code> na FS 32 → <code>regulatoryStatus=rejected</code>. Bridge nie udaje sukcesu. (Rekord awarii po teście usunięty.)</p>
+</div></div>
+
+<div class="item"><div class="cb part"></div><div>
+<h3>Tryb offline KSeF (niedostępność) <span class="vd part">blocker: KSeF env</span></h3>
+<p class="res">Offline obsługuje Subiekt (FA(3), 2 QR). Most ma raportować pending/offline bez crasha — odczyt statusu odporny (testowany na wstrzykniętych stanach). <strong>Kryterium domknięcia:</strong> instancja z KSeF + symulacja niedostępności.</p>
+</div></div>
+
+<div class="item"><div class="cb done"></div><div>
+<h3>Czy KSeF da się w ogóle przetestować na demo <span class="vd ok">✓ udokumentowane</span></h3>
+<p class="res">Ustalono: <strong>demo Nexo_Demo_1 NIE wysyła do KSeF</strong> — status zostaje pending. Potrzebna instancja realna/sandboxowa z włączoną wysyłką KSeF. (W API jest <code>DemoKsefNiedostepne…Blad</code>.)</p>
+</div></div>
+
+<!-- 4 -->
+<h2><span class="n">4.</span> Kontrahent (upsert) — REALNIE przez Sferę <span class="right"><span class="iss">#756</span><span class="tag p0">P0</span></span></h2>
+
+<div class="item"><div class="cb done"></div><div>
+<h3>Firma vs osoba fizyczna <span class="vd ok">✓ działa</span></h3>
+<p class="res">Firma (<code>UtworzFirme</code>) z NIP utworzona (id=101125, sygn. 29). Osoba — ta sama ścieżka (<code>UtworzOsobe</code>).</p>
+</div></div>
+
+<div class="item"><div class="cb done"></div><div>
+<h3>Upsert nie duplikuje <span class="vd ok">✓ działa</span></h3>
+<p class="res">Drugi upsert tego samego NIP → ten sam <code>id=101125</code>, bez duplikatu (dedup po NIP).</p>
+</div></div>
+
+<div class="item"><div class="cb done"></div><div>
+<h3>Konflikt adresu + polskie znaki <span class="vd ok">✓ działa</span></h3>
+<p class="res">Adres zapisany w bazie: <strong>„Długa 5/2, 50-100 Wrocław"</strong> — przez <code>DodajAdres(TypAdresu „główny")</code> + pola na <code>AdresPodmiotu.Szczegoly</code> (AdresSzczegoly) i <code>Linia1</code>. Polskie znaki OK („Żółć Ćma", „Długa", „Wrocław"). Konflikt NIP = polityka keep-existing.</p>
+</div></div>
+
+<!-- 5 -->
+<h2><span class="n">5.</span> Idempotencja / exactly-once <span class="right"><span class="iss">#754 · #755</span><span class="tag p0">P0</span></span></h2>
+<div class="item"><div class="cb done"></div><div>
+<h3>Ten sam idempotencyKey 2× = jedna faktura <span class="vd ok">✓ działa</span></h3>
+<p class="res">Drugie wywołanie z tym samym <code>idempotencyKey</code> → <code>idempotent:true</code>, ten sam <code>providerInvoiceId=100161</code>, brak duplikatu. Mapa trwała w <code>idempotency-store.json</code>.</p>
+</div></div>
+
+<!-- 6 -->
+<h2><span class="n">6.</span> Błędy — mapowanie na 2 klasy kontraktu <span class="right"><span class="iss">#753/#754 · #755</span><span class="tag p1">P1</span></span></h2>
+<div class="item"><div class="cb done"></div><div>
+<h3>Scenariusze błędów <span class="vd ok">✓ działa</span></h3>
+<ul class="tight">
+<li>Nieistniejący kontrahent → <code>rejected</code> (422) + reason „Kontrahent ID … not found" ✓</li>
+<li>Złe credentiale Sfery / brak sesji → <code>unreachable</code> (503) ✓ („Logowanie Sfera nie powiodło się")</li>
+<li>SQL down / zła kolumna → <code>unreachable</code> (503) ✓</li>
+<li>Towar spoza Subiekta → NIE błąd, tylko pozycja jednorazowa (feature) ✓</li>
+</ul>
+<p class="res">Potwierdzone na żywo: <code>{success:false, error:{code,reason}}</code>; obie klasy rozróżniane — <code>rejected</code>(422) z czytelnym <code>reason</code> oraz <code>unreachable</code>(503). Czytelność <code>reason</code> przy <code>Zapisz=false</code> do dopracowania (brak detalu walidacji).</p>
+</div></div>
+
+<!-- 7 -->
+<h2><span class="n">7.</span> Magazyn — czy faktura sama rusza stany <span class="right"><span class="iss">efekt uboczny #755 · research</span><span class="tag p1">P1</span></span></h2>
+<div class="item"><div class="cb done"></div><div>
+<h3>Stan magazynowy po wystawieniu <span class="vd ok">✓ działa</span></h3>
+<p class="res">Potwierdzone empirycznie: MAG <strong>71 → 66</strong> po fakturze na 5 szt → faktura <strong>automatycznie zdejmuje stan, bez osobnego WZ</strong>. (Rozstrzyga niejednoznaczność z researchu.)</p>
+</div></div>
+<div class="item"><div class="cb done"></div><div>
+<h3>Sprzedaż poniżej stanu <span class="vd ok">✓ decyzja</span></h3>
+<p class="res">Decyzja v1: <strong>faktura wychodzi mimo braku stanu</strong> (sprzedaż już się wydarzyła na sklepie). Most woła <code>IgnorujBlokadeRealizacjiPozycji()</code> → rozchód poniżej stanu przechodzi, stan może zejść &lt;0. Bez tego Subiekt blokuje (<code>Zapisz=false</code>) gdy ilość zadysponowana = dostępna.</p>
+</div></div>
+
+<!-- 8 -->
+<h2><span class="n">8.</span> Pełny przebieg E2E — jedno realne zamówienie <span class="right"><span class="iss">#755 + #756</span><span class="tag p0">P0</span></span></h2>
+<div class="item"><div class="cb done"></div><div>
+<h3>Sekwencja od początku do końca <span class="vd ok">✓ flow E2E</span></h3>
+<ol class="flow">
+<li>Zamówienie: nabywca, NIP/brak, pozycje, kwoty brutto.</li>
+<li><code>upsertCustomer</code> → <code>providerCustomerId</code> ✓</li>
+<li><code>issueInvoice</code> → id + numer ✓ (B2B faktura, B2C paragon)</li>
+<li>KSeF poll aż accepted — <strong>blokowane na demo (brak KSeF)</strong></li>
+<li>Magazyn zdjęty ✓</li>
+</ol>
+<p class="res">Domknięte jako jeden ciąg — demo flow <strong>„🧱 Pełne zamówienie (E2E)"</strong>: zamówienie → upsert kontrahenta (buyer inline) → faktura → <code>getInvoiceStatus</code> → stan magazynu (zdjęty). B2B+B2C+towar spoza Subiekta (FS 30, brutto 118,98) + mieszany VAT ✓. Jedyny krok niemożliwy na demo: KSeF-poll-to-accepted (brak KSeF env).</p>
+</div></div>
+
+<!-- 9 -->
+<h2><span class="n">9.</span> Korekta / zwrot (do decyzji v1/v2) <span class="right"><span class="iss">v2 · research</span><span class="tag p2">P2</span></span></h2>
+<div class="item"><div class="cb done"></div><div>
+<h3>Korekta / zwrot — DOROBIONE w moście <span class="vd ok">✓ działa</span></h3>
+<p class="res">Endpoint <code>POST /api/faktury/{id}/korekta</code> (ładuje oryginał, tworzy korektę, <code>KorygujPozycjeWedlugLp(lp, nowaIlosc)</code>, zapis). Potwierdzone: <strong>zwrot do paragonu → ZW 1/CENTRALA/2026</strong> (dokument korygujący zapisany). <strong>Korekta faktury</strong>: mechanizm działa, ale Subiekt wymaga, by oryginał był wcześniej wysłany do KSeF (reguła: „nie można korygować faktur przeznaczonych do KSeF bez numeru…") → na demo bez KSeF blokada, na prod/sandbox z KSEF_ID przejdzie. Demo flow „↩️ Korekta / zwrot" w cockpicie.</p>
+</div></div>
+
+<!-- 10 -->
+<h2><span class="n">10.</span> Zgodność z kontraktem OL <span class="right"><span class="iss">#754 · #752</span><span class="tag p1">P1</span></span></h2>
+<div class="item"><div class="cb done"></div><div>
+<h3>Pola kontraktu + documentType <span class="vd ok">✓ działa</span></h3>
+<p class="res">Pełny kształt kontraktu: <code>providerInvoiceId/Number</code>, <code>currency</code>, <code>regulatoryStatus</code>, <code>clearanceReference</code>, <code>orderId</code> (echo), <code>idempotencyKey</code>. <code>documentType</code> FV/PA 1:1. <code>lines[].name</code> konsumowane (pozycja jednorazowa dla towaru spoza kartoteki). <strong><code>buyer{}</code> inline → auto-upsert</strong> (firma+osoba), więc issueInvoice jest self-sufficient.</p>
+</div></div>
+<div class="item"><div class="cb done"></div><div>
+<h3>Most NIE ma lookupu po orderId <span class="vd ok">✓ zgodne</span></h3>
+<p class="res">Most ma tylko <code>getInvoiceStatus(providerInvoiceId)</code>; brak endpointu „znajdź po orderId" (zgodnie z kontraktem).</p>
+</div></div>
+<div class="item"><div class="cb part"></div><div>
+<h3>Współdzielony suite kontraktowy OL <span class="vd part">N/A (repo OL)</span></h3>
+<p class="res">Poza POC — wymaga repo OpenLinker. <strong>Kryterium domknięcia:</strong> wycelować `runSubiektBridgeContractTests` (klient HTTP OL) w żywy most na Windows CI → formalny dowód zgodności z kontraktem.</p>
+</div></div>
+
+<!-- 11 -->
+<h2><span class="n">11.</span> Deployment / wersje <span class="right"><span class="iss">#752 · #760</span><span class="tag p2">P2</span></span></h2>
+<div class="item"><div class="cb part"></div><div>
+<h3>Wersje Subiekta i konfiguracja <span class="vd part">– nexo PRO ✓</span></h3>
+<p class="res">Działa na nexo (Nexo_Demo_1, Sfera). <code>appsettings.json</code>: ścieżki binariów/SQL/użytkownik + sekcje <code>Auth</code>/<code>AutoConnect</code>. vanilla/GT — poza zakresem testu.</p>
+</div></div>
+
+<!-- 12 -->
+<h2><span class="n">12.</span> Pod kontrakt OL — ustalenia z review <span class="right"><span class="iss">#752/#754/#755/#756/#759</span><span class="tag p0">P0–P2</span></span></h2>
+<div class="box note">Zestawienie z tym, co OL faktycznie wywoła (SubiektBridgeClient / InvoicingPort). Zweryfikowane na żywo 2026-06-19.</div>
+
+<div class="item"><div class="cb done"></div><div>
+<h3>#1 Data fiskalna wstecz (miesiąc VAT) <span class="vd ok">✓ działa</span></h3>
+<p class="res"><code>issueInvoice</code> przyjmuje <code>issueDate</code> w przeszłości: <code>DataSprzedazy</code> = data z requestu (miesiąc VAT), <code>DataWydaniaWystawienia</code> = dziś (rozchód teraz). Potwierdzone z rozchodem stanu: FS 119 (−5 dni) i FS 120 (−15 dni) — OK, stan zdjęty, data sprzedaży w przeszłości. Jedyny fizyczny limit: data <em>przed</em> istnieniem partii (nie sprzedasz stanu, którego wtedy nie było) — to poprawna księgowość, nie ograniczenie mostu. Pole <code>issueDate</code> do dopisania w #752.</p>
+</div></div>
+
+<div class="item"><div class="cb done"></div><div>
+<h3>#2 buyer inline → auto-upsert (self-sufficient) <span class="vd ok">✓ firma + osoba</span></h3>
+<p class="res">Gdy brak <code>kontrahentId</code> a jest <code>buyer</code> → most sam upsertuje i linkuje. Potwierdzone: <strong>firma+NIP</strong> (FS 63, dedup po NIP) <em>oraz</em> <strong>osoba bez NIP</strong> (paragon PA 5 — Imie/Nazwisko na <code>Podmiot.Osoba</code>). Two-step (jawny <code>kontrahentId</code>) dalej działa i ma priorytet. Rekomendacja kontraktu: self-sufficient (OL woła raz) — do zamrożenia w #754.</p>
+</div></div>
+
+<div class="item"><div class="cb done"></div><div>
+<h3>#4 Throughput batcha (~50 faktur) <span class="vd ok">✓ działa</span></h3>
+<p class="res">50 faktur równolegle → <strong>50/50 OK w 11,7 s (~4,3 fakt/s, 0,23 s/fakt)</strong>, 50/50 unikalnych sekwencyjnych numerów. <code>SyncRoot</code> serializuje, ale przepustowość zdrowa i numeracja nienaruszona.</p>
+</div></div>
+
+<div class="item"><div class="cb done"></div><div>
+<h3>#6 Linia dostawy / rabat <span class="vd ok">✓ działa</span></h3>
+<p class="res"><strong>Dostawa</strong> jako linia (VAT 23) — działa. <strong>Rabat</strong> (linia z ujemnym <code>unitPriceGross</code>) — most sumuje zniżki i <strong>wtapia je proporcjonalnie w ceny pozycji</strong> (Subiekt nie przyjmuje ujemnej pozycji ani rabatu na ręcznie wpisanej cenie). Potwierdzone: 120 + 15 − 10 → brutto 124,99 (≈125), VAT 23,37/netto 101,62 — sumy i VAT się zgadzają (1 gr to zaokrąglenie). OL może słać rabat jako ujemną linię — most ją poprawnie rozliczy.</p>
+</div></div>
+
+<div class="item"><div class="cb part"></div><div>
+<h3>#3 connection-test = bridge URL + X-Api-Key <span class="vd part">most gotowy / OL #759</span></h3>
+<p class="res">OL nie ma jak użyć creds Subiekta — connection-test może tylko odpytać <code>/health</code>. FE (#759) powinien zbierać <strong>bridge URL + X-Api-Key</strong>, nie credentiale Subiekta. Po stronie mostu gotowe (auth + /health); to zmiana w OL.</p>
+</div></div>
+
+<div class="item"><div class="cb done"></div><div>
+<h3>#5 VAT-marża / #7 forma płatności / #8 link towaru <span class="vd ok">✓ potwierdzone</span></h3>
+<ul class="tight">
+<li><strong>#5 marża</strong> — potwierdzone: zwykła FV ma transakcję „Sprzedaż krajowa" (NIE marża), nie włącza się automatycznie ✓</li>
+<li><strong>#7 forma płatności</strong> — potwierdzone: most ustawia domyślną „Gotówka" (`FormaPlatnosciId=1`), dokument zapisywalny ✓. „przelew/termin" dla B2B = v2.</li>
+<li><strong>#8 link towaru</strong> — udokumentowane: linia z symbolem z kartoteki <strong>zdejmuje stan</strong>, jednorazowa <strong>nie</strong> (dwie ścieżki wg `towarSymbol`) — w docs/API + #760.</li>
+</ul>
+</div></div>
+
+<div class="box warn" style="margin-top:26px">
+<strong class="k">Stan POC po przebiegu 2026-06-19.</strong> Rdzeń P0+P1 zapisu przez Sferę <strong>działa na żywo</strong>: faktura (numeracja, mieszany VAT, cena brutto), paragon, upsert+dedup+<strong>adres</strong> kontrahenta, idempotencja, auto-zdjęcie magazynu, sprzedaż-poniżej-stanu dopuszczona (decyzja), rollback, mapowanie błędów (rejected/unreachable), <strong>auth 401/OK</strong>, /health 3-stany (zdrowy + złe-creds + SQL-down), auto-connect+relogin, <strong>E2E faktury za towar spoza Subiekta</strong> (pozycja jednorazowa), <strong>tworzenie produktu (Presta→Subiekt)</strong>, buyer-inline auto-upsert, data fiskalna wstecz, batch 50/50. Dodatkowo domknięte: <strong>korekta/zwrot</strong> (endpoint + zwrot do paragonu ZW 1 zapisany), <strong>pełny E2E flow</strong>, <strong>VAT-marża/forma płatności</strong> potwierdzone, <strong>szablon wdrożeniowy</strong> (appsettings.Production + DEPLOYMENT.md). <strong>Zero pustych pozycji</strong> — pozostałe 7 to jasno oznaczone blockery z kryterium domknięcia: realna transmisja KSeF (brak sandboxa; odczyt+mapowanie 5/5 ✓), korekta faktury (wymaga oryginału wysłanego do KSeF), 2. fizyczny host (bind ✓), vanilla/GT, suite kontraktowy OL (repo OL), connection-test FE (#759). Świadomie v2: forma płatności przelew/termin, nie-PLN.
+</div>
+
+</div>
+</body></html>

@@ -1,0 +1,49 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <PlatformTarget>x64</PlatformTarget>
+    <!-- The moved Sfera code is heavily reflection-based and was authored in the
+         legacy Api with warnings-as-errors OFF. It emits nullable (CS86xx),
+         unused-variable (CS0168/CS0219) and similar warnings not covered by the
+         inherited WarningsNotAsErrors allowlist. Grandfather this ONE project so
+         the move-and-wrap is faithful; Domain/Application/Persistence/Sql keep
+         warnings-as-errors enforced via bridge/Directory.Build.props. Revisit when
+         the reflection is replaced with a typed Sfera client on Windows. -->
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <!-- The moved SferaSession/connect code touches WPF-adjacent Sfera UI types and
+         must run as x64 against the InsERT binaries — mirror the Api csproj. -->
+    <UseWPF>true</UseWPF>
+  </PropertyGroup>
+
+  <!-- InsERT Sfera binaries. $(SferaBinaries) default + override live in
+       bridge/Directory.Build.props. Private=false: these DLLs are resolved at
+       runtime by SferaBoot's AssemblyLoadContext resolver, not copied locally. -->
+  <ItemGroup>
+    <Reference Include="InsERT.Moria.Sfera">
+      <HintPath>$(SferaBinaries)\InsERT.Moria.Sfera.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="InsERT.Moria.API">
+      <HintPath>$(SferaBinaries)\InsERT.Moria.API.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="5.1.5" />
+    <!-- Abstractions only (no concrete hosting): the moved legacy session/services
+         use ILogger<T> + IOptions<T>, and SferaConnectHostedService + the write-queue
+         consumer implement IHostedService. The Api composition root supplies the
+         concrete implementations. -->
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="8.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Options" Version="8.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="8.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Subiekt.Bridge.Application\Subiekt.Bridge.Application.csproj" />
+    <ProjectReference Include="..\Subiekt.Bridge.Domain\Subiekt.Bridge.Domain.csproj" />
+  </ItemGroup>
+
+</Project>
