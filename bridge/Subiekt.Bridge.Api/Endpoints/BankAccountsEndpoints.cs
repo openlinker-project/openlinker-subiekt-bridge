@@ -31,6 +31,8 @@ public static class BankAccountsEndpoints
                 currency = a.Waluta,
                 isVatAccount = a.JestRachunkiemVAT,
                 isDefault = a.IsDefault,
+                ownerPodmiotId = a.OwnerPodmiotId,
+                ownerName = a.OwnerName,
             }).ToList();
 
             return Results.Ok(new ResponseEnvelope<object>

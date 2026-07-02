@@ -423,8 +423,8 @@ Response adds OL-shaped fields alongside the legacy ones:
 - **`pdfUrl`**: not exposed by Sfera in this POC → always `null` (documented).
 - **Currency**: only `PLN` is exercised in v1; other currencies are echoed but not specially handled.
 
-### `GET /api/bank-accounts` — seller bank accounts (issue #1)
-Lists the seller's (MojaFirma) ACTIVE bank accounts from Subiekt's "Rachunki bankowe" configuration, default account first. Read-only, served from the separate SQL connection (never contends with the Sfera write session).
+### `GET /api/bank-accounts` — seller bank accounts (issue #1, multi-Podmiot in issue #3)
+Lists ACTIVE bank accounts from Subiekt's "Rachunki bankowe" configuration across **every** seller (MojaFirma) Podmiot — an install may have more than one payer/branch, each with its own accounts (issue #3; previously only the first Podmiot's accounts were returned). Read-only, served from the separate SQL connection (never contends with the Sfera write session).
 
 ```json
 {
@@ -433,15 +433,18 @@ Lists the seller's (MojaFirma) ACTIVE bank accounts from Subiekt's "Rachunki ban
     "count": 2,
     "accounts": [
       { "id": 100004, "name": "Rachunek podstawowy", "number": "00 10101010 1111 1111 1111 1111",
-        "bankNumber": "", "description": "", "currency": "PLN", "isVatAccount": false, "isDefault": true },
+        "bankNumber": "", "description": "", "currency": "PLN", "isVatAccount": false, "isDefault": true,
+        "ownerPodmiotId": 1, "ownerName": "Moja Firma Sp. z o.o." },
       { "id": 100007, "name": "Rachunek on-line - testowy", "number": "38 2490 0005 7898 4745 0552 5035",
-        "bankNumber": "2490", "description": "", "currency": "PLN", "isVatAccount": false, "isDefault": false }
+        "bankNumber": "2490", "description": "", "currency": "PLN", "isVatAccount": false, "isDefault": false,
+        "ownerPodmiotId": 1, "ownerName": "Moja Firma Sp. z o.o." }
     ]
   }
 }
 ```
 
-- `isDefault` mirrors the Subiekt UI's "Podstawowy" column (the owner's primary-account back-reference), not the per-currency flag.
+- `isDefault` mirrors the Subiekt UI's "Podstawowy" column (the owner's primary-account back-reference), not the per-currency flag. It is per-owning-Podmiot, not global.
+- `ownerPodmiotId` / `ownerName` identify which seller Podmiot the account belongs to (issue #3) — use this to group accounts by payer/branch until an explicit selector exists on the invoice-issuance contract (tracked as open work on issue #3).
 - `id` is the value to pass as `bankAccountId` on `POST /api/invoices` and to `PUT /api/bank-accounts/{id}/default`.
 
 ### `PUT /api/bank-accounts/{id}/default` — set the seller default account (issue #1)

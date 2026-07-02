@@ -295,8 +295,8 @@ public sealed class SferaDokumentySprzedazyService
                     $"Forma płatności '{formName}' nie istnieje lub jest nieaktywna (konfiguracja Sfera:{(isCash ? "CashPaymentFormName" : "TransferPaymentFormName")}).");
         }
 
-        // 1b. Transfer: pre-check the selected seller account (exists, seller-owned,
-        //     active, currency matches the document).
+        // 1b. Transfer: pre-check the selected seller account (exists, owned by ANY
+        //     seller Podmiot — issue #3 — active, currency matches the document).
         string? accName = null, accNumber = null;
         if (!isCash)
         {
@@ -309,7 +309,7 @@ public sealed class SferaDokumentySprzedazyService
                 JOIN ModelDanychContainer.CentraGromadzeniaFinansow cgf ON cgf.Id = rb.Id
                 LEFT JOIN ModelDanychContainer.Waluty w ON w.Id = rb.Waluta_Id
                 WHERE rb.Id = @id
-                  AND rb.Wlasciciel_Id = (SELECT TOP 1 Id FROM ModelDanychContainer.Podmioty WHERE Typ = 2 AND Podtyp = 11)";
+                  AND rb.Wlasciciel_Id IN (SELECT Id FROM ModelDanychContainer.Podmioty WHERE Typ = 2 AND Podtyp = 11)";
             cmd.Parameters.AddWithValue("@id", accountId);
             using var reader = cmd.ExecuteReader();
             if (!reader.Read())

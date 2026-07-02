@@ -10,7 +10,10 @@ namespace Subiekt.Bridge.Infrastructure.Sfera;
 /// sponsored only by the Podmiot business object; a direct write of
 /// <c>RachunekBankowy.WlascicielPodstawowego</c> throws
 /// <c>UnsponsoredModificationException</c>. Mechanism verified live, see
-/// <c>docs/spikes/bank-account-probe-findings.md</c> s.6.
+/// <c>docs/spikes/bank-account-probe-findings.md</c> s.6. The seller-ownership
+/// pre-check enumerates every MojaFirma Podmiot (issue #3) — the actual owner
+/// Podmiot is then resolved per-row from the query result, so this already
+/// works correctly for an install with more than one seller Podmiot.
 /// </summary>
 public sealed class SferaRachunkiBankoweService
 {
@@ -42,7 +45,7 @@ public sealed class SferaRachunkiBankoweService
                 SELECT rb.Wlasciciel_Id, rb.Aktywny
                 FROM ModelDanychContainer.CentraGromadzeniaFinansow_RachunekBankowy rb
                 WHERE rb.Id = @id
-                  AND rb.Wlasciciel_Id = (SELECT TOP 1 Id FROM ModelDanychContainer.Podmioty WHERE Typ = 2 AND Podtyp = 11)";
+                  AND rb.Wlasciciel_Id IN (SELECT Id FROM ModelDanychContainer.Podmioty WHERE Typ = 2 AND Podtyp = 11)";
             cmd.Parameters.AddWithValue("@id", accountId);
             using var reader = cmd.ExecuteReader();
             if (!reader.Read())

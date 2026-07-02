@@ -12,6 +12,11 @@
 //   cash --fp N                 - create FV with DodajPlatnoscNatychmiastowa(FormaPlatnosci).
 //   default-flag --account N    - try flipping the seller default-account flag via a
 //                                 Sfera BO save (stretch-goal gate), then restore.
+//   podmioty                     - issue #3 live-topology probe: dump every seller
+//                                 (MojaFirma) Podmiot (Typ=2/Podtyp=11) plus its bank
+//                                 accounts, and look for an Oddzial/JednostkaOrganizacyjna
+//                                 schema, to decide multi-Podmiot vs. Podmiot-with-Oddzialy
+//                                 before designing the invoice-contract payer selector.
 //
 // Config: reads the "Sfera" section of the legacy POC appsettings
 // (default C:\subiekt-poc\bridge\SferaApi\appsettings.json, override with --config).
@@ -112,6 +117,7 @@ try
                 BankAccountId: null));
             break;
         case "default-flag": DefaultFlagProbe(int.Parse(GetOpt("--account", "100007"))); break;
+        case "podmioty": PodmiotyProbe(); break;
         default: log.LogError("Unknown command {c}", command); break;
     }
 }
@@ -710,3 +716,78 @@ object? FindByIdViaFacade(string facadeTypeName, Type entityType, int id)
 }
 
 record PaymentPlan(string Kind, int FormaPlatnosciId, int? BankAccountId);
+
+// Issue #3 live-topology probe: enumerate every seller (MojaFirma) Podmiot and its
+// bank accounts, then look for any Oddzial/JednostkaOrganizacyjna schema, so a future
+// session can decide "multiple genuinely-separate Podmioty" vs. "one Podmiot with
+// multiple Oddzialy" before designing the invoice-contract payer selector.
+void PodmiotyProbe()
+{
+    using var conn = new SqlConnection(sqlConnString);
+    conn.Open();
+
+    Console.WriteLine("\n===== Seller Podmioty (Typ=2 AND Podtyp=11) =====");
+    using (var c = conn.CreateCommand())
+    {
+        c.CommandText = @"SELECT Id, Nazwa, Typ, Podtyp FROM ModelDanychContainer.Podmioty
+                          WHERE Typ = 2 AND Podtyp = 11 ORDER BY Id";
+        using var r = c.ExecuteReader();
+        var count = 0;
+        while (r.Read())
+        {
+            count++;
+            Console.WriteLine($"  Podmiot Id={r.GetInt32(0)} Nazwa={(r.IsDBNull(1) ? "NULL" : r.GetString(1))} Typ={r.GetInt32(2)} Podtyp={r.GetInt32(3)}");
+        }
+        Console.WriteLine(count == 1
+            ? "  -> exactly ONE seller Podmiot: today's TOP 1 assumption happened to hold on THIS database."
+            : $"  -> {count} seller Podmioty found: TOP 1 was silently dropping {count - 1} payer(s)' accounts.");
+    }
+
+    Console.WriteLine("\n===== Bank accounts per seller Podmiot =====");
+    using (var c = conn.CreateCommand())
+    {
+        c.CommandText = @"
+            SELECT rb.Wlasciciel_Id, owner.Nazwa, rb.Id, cgf.Nazwa, rb.Numer, rb.Aktywny
+            FROM ModelDanychContainer.CentraGromadzeniaFinansow_RachunekBankowy rb
+            JOIN ModelDanychContainer.CentraGromadzeniaFinansow cgf ON cgf.Id = rb.Id
+            LEFT JOIN ModelDanychContainer.Podmioty owner ON owner.Id = rb.Wlasciciel_Id
+            WHERE rb.Wlasciciel_Id IN (SELECT Id FROM ModelDanychContainer.Podmioty WHERE Typ = 2 AND Podtyp = 11)
+            ORDER BY rb.Wlasciciel_Id, rb.Id";
+        using var r = c.ExecuteReader();
+        while (r.Read())
+            Console.WriteLine($"  Owner={r.GetInt32(0)} ({(r.IsDBNull(1) ? "NULL" : r.GetString(1))})  Account={r.GetInt32(2)} {(r.IsDBNull(3) ? "" : r.GetString(3))} Numer={(r.IsDBNull(4) ? "" : r.GetString(4))} Aktywny={r.GetBoolean(5)}");
+    }
+
+    Console.WriteLine("\n===== Oddzial / JednostkaOrganizacyjna schema check =====");
+    using (var c = conn.CreateCommand())
+    {
+        c.CommandText = @"
+            SELECT TABLE_SCHEMA, TABLE_NAME FROM INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_NAME LIKE '%Oddzial%' OR TABLE_NAME LIKE '%JednostkaOrganizacyjna%'
+            ORDER BY TABLE_NAME";
+        using var r = c.ExecuteReader();
+        var any = false;
+        while (r.Read())
+        {
+            any = true;
+            Console.WriteLine($"  table {r.GetString(0)}.{r.GetString(1)}");
+        }
+        if (!any)
+            Console.WriteLine("  -> no Oddzial/JednostkaOrganizacyjna-named table found (schema may model branches differently, e.g. via Podmiot.Rodzic/Nadrzedny — check IPodmioty facade members reflectively if this comes back empty).");
+    }
+
+    Console.WriteLine("\n===== Podmiot columns referencing a parent/branch relationship =====");
+    using (var c = conn.CreateCommand())
+    {
+        c.CommandText = @"
+            SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_SCHEMA = 'ModelDanychContainer' AND TABLE_NAME = 'Podmioty'
+              AND (COLUMN_NAME LIKE '%Oddzial%' OR COLUMN_NAME LIKE '%Nadrzedn%' OR COLUMN_NAME LIKE '%Rodzic%' OR COLUMN_NAME LIKE '%Platnik%')
+            ORDER BY COLUMN_NAME";
+        using var r = c.ExecuteReader();
+        var any = false;
+        while (r.Read()) { any = true; Console.WriteLine($"  Podmioty.{r.GetString(0)}"); }
+        if (!any)
+            Console.WriteLine("  -> none found on Podmioty directly.");
+    }
+}
