@@ -55,6 +55,58 @@ public class SalesDocumentTests
         Assert.Equal("doc.payment.pa", result.Error.Code);
     }
 
+    // --- issue #5: explicit Oddzial/Stanowisko Kasowe selection on the aggregate ---
+
+    [Fact]
+    public void Create_WithoutBranch_HasNullBranch()
+    {
+        var doc = Doc(Line("A", 1, 10m));
+
+        Assert.Null(doc.Branch);
+    }
+
+    [Fact]
+    public void Create_FvWithBranch_CarriesSelection()
+    {
+        var branch = BranchSelection.TryCreate(100001, 100066).Value;
+
+        var result = SalesDocument.Create(
+            DocumentType.FV, buyerId: 1, Pln, DateTimeOffset.Now,
+            new[] { Line("A", 1, 10m) }, payment: null, branch: branch);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(100001, result.Value.Branch!.OddzialId);
+        Assert.Equal(100066, result.Value.Branch.StanowiskoKasoweId);
+    }
+
+    [Fact]
+    public void Create_PaWithBranch_IsRejected()
+    {
+        var branch = BranchSelection.TryCreate(null, 100066).Value;
+
+        var result = SalesDocument.Create(
+            DocumentType.PA, buyerId: 1, Pln, DateTimeOffset.Now,
+            new[] { Line("A", 1, 10m) }, payment: null, branch: branch);
+
+        Assert.True(result.IsFailure);
+        Assert.Equal("doc.branch.pa", result.Error.Code);
+    }
+
+    [Fact]
+    public void FoldDiscounts_PreservesBranchSelection()
+    {
+        var branch = BranchSelection.TryCreate(100001, 100066).Value;
+        var doc = SalesDocument.Create(
+            DocumentType.FV, buyerId: 1, Pln, DateTimeOffset.Now,
+            new[] { Line("A", 2, 100m), Line("DISC", 1, -30m) }, payment: null, branch: branch).Value;
+
+        var folded = doc.FoldDiscounts();
+
+        Assert.NotNull(folded.Branch);
+        Assert.Equal(100001, folded.Branch!.OddzialId);
+        Assert.Equal(100066, folded.Branch.StanowiskoKasoweId);
+    }
+
     [Fact]
     public void FoldDiscounts_PreservesPaymentSelection()
     {

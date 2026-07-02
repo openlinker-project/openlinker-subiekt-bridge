@@ -80,7 +80,14 @@ public static class InvoiceContractMapper
         if (paymentResult.IsFailure)
             return Result.Failure<(SalesDocument, InlineBuyer?)>(paymentResult.Error);
 
-        var docResult = SalesDocument.Create(documentType, buyerId, currency, issueDate, lines, paymentResult.Value);
+        // Issue #5: explicit Oddzial/Stanowisko Kasowe selection — same split as payment:
+        // combination rules in the Domain value object, cross-consistency (station must be
+        // linked to the given Oddzial) checked at issuance time in Infrastructure.Sfera.
+        var branchResult = BranchSelection.TryCreate(req.OddzialId, req.StanowiskoKasoweId);
+        if (branchResult.IsFailure)
+            return Result.Failure<(SalesDocument, InlineBuyer?)>(branchResult.Error);
+
+        var docResult = SalesDocument.Create(documentType, buyerId, currency, issueDate, lines, paymentResult.Value, branchResult.Value);
         if (docResult.IsFailure)
             return Result.Failure<(SalesDocument, InlineBuyer?)>(docResult.Error);
 

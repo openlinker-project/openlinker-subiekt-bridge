@@ -101,6 +101,16 @@ public class CreateInvoiceRequestDto
 
     // Subiekt bank-account id, as returned by GET /api/bank-accounts.
     public int? BankAccountId { get; set; }
+
+    // Issue #5: EXPLICIT branch/cash-register selection (additive; optional). Strict
+    // semantics (enforced by the Domain BranchSelection rule): OddzialId REQUIRES an
+    // explicit StanowiskoKasoweId (Sfera's implicit default cash-register does not scope
+    // to a non-default branch); StanowiskoKasoweId alone is allowed (keeps the document's
+    // default branch); both absent = today's implicit-default behavior (no regression).
+    // Not supported for DocumentType "PA". The station must be linked to the given Oddzial
+    // (or, if OddzialId is absent, left unlinked) - see GET /api/cash-registers.
+    public int? OddzialId { get; set; }
+    public int? StanowiskoKasoweId { get; set; }
 }
 
 public class BuyerDto

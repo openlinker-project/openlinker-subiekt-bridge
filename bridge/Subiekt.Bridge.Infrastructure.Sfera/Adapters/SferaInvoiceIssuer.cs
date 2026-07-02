@@ -86,11 +86,17 @@ public sealed class SferaInvoiceIssuer : IInvoiceIssuer
                 Currency: document.Currency)
             : null;
 
+        // Explicit Oddzial/Stanowisko selection (issue #5) rides along the same way.
+        var branch = document.Branch is { } b
+            ? new SferaBranchInput(OddzialId: b.OddzialId, StanowiskoKasoweId: b.StanowiskoKasoweId)
+            : null;
+
         return new SferaInvoiceInput(
             KontrahentId: document.BuyerId,
             DataSprzedazy: fiscal.DataSprzedazy.LocalDateTime,
             DataWydania: fiscal.DataWydania.LocalDateTime,
             Lines: lines,
-            Payment: payment);
+            Payment: payment,
+            Branch: branch);
     }
 }

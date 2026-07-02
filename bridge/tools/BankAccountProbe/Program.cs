@@ -17,6 +17,9 @@
 //                                 accounts, and look for an Oddzial/JednostkaOrganizacyjna
 //                                 schema, to decide multi-Podmiot vs. Podmiot-with-Oddzialy
 //                                 before designing the invoice-contract payer selector.
+//   branch-issuance-test         - issue #5: exercise the REAL production
+//     [--oddzial N] --stanowisko N SferaDokumentySprzedazyService.ApplyExplicitBranch end-to-end
+//                                 (not a standalone reflection experiment) via UtworzFaktura.
 //   oddzial-test --oddzial N     - issue #5 write-side probe: create a THROWAWAY cash FV,
 //     --stanowisko N              set Dane.Oddzial + Dane.StanowiskoKasowe explicitly, and
 //                                 save it, to confirm whether Sfera rejects a Stanowisko
@@ -126,6 +129,11 @@ try
             break;
         case "default-flag": DefaultFlagProbe(int.Parse(GetOpt("--account", "100007"))); break;
         case "podmioty": PodmiotyProbe(); break;
+        case "branch-issuance-test":
+            BranchIssuanceTest(
+                oddzialId: GetOpt("--oddzial", "") is var o && o != "" ? int.Parse(o) : null,
+                stanowiskoId: int.Parse(GetOpt("--stanowisko", "100066")));
+            break;
         case "oddzial-test":
             OddzialStanowiskoTest(
                 oddzialId: int.Parse(GetOpt("--oddzial", "100001")),
@@ -267,6 +275,33 @@ void ServiceBaseline()
     var (id, numer) = svc.UtworzFaktura(session, input);
     log.LogInformation("Service created FV id={id} numer={n}", id, numer);
     ReadBack(id);
+}
+
+// Issue #5: exercise the REAL production SferaDokumentySprzedazyService.ApplyExplicitBranch
+// end-to-end (not the standalone reflection experiment in OddzialStanowiskoTest), to verify
+// the shipped cross-consistency pre-check + FK-fixup actually work through the real class.
+void BranchIssuanceTest(int? oddzialId, int stanowiskoId)
+{
+    var (kontrahentId, symbol) = ResolveFixtures();
+    log.LogInformation("Fixtures: kontrahent={k}, symbol={s}, oddzial={o}, stanowisko={st}", kontrahentId, symbol, oddzialId, stanowiskoId);
+    var svc = new SferaDokumentySprzedazyService(loggerFactory.CreateLogger<SferaDokumentySprzedazyService>(), Options.Create(opt));
+    var input = new SferaInvoiceInput(
+        KontrahentId: kontrahentId,
+        DataSprzedazy: DateTime.Now,
+        DataWydania: DateTime.Now,
+        Lines: new[] { new SferaInvoiceLineInput(symbol, 1m, 1.23m, "23", null) },
+        Payment: new SferaPaymentInput("cash", null, "PLN"),
+        Branch: new SferaBranchInput(oddzialId, stanowiskoId));
+    try
+    {
+        var (id, numer) = svc.UtworzFaktura(session, input);
+        Console.WriteLine($"RESULT: ACCEPTED - saved FV id={id} numer={numer} under oddzial={oddzialId?.ToString() ?? "(default)"} stanowisko={stanowiskoId}");
+        ReadBack(id);
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"RESULT: REJECTED - {ex.GetType().Name}: {ex.Message}");
+    }
 }
 
 void CreateFv(PaymentPlan? payment)

@@ -97,6 +97,8 @@ builder.Services.AddSingleton<ICustomerQuery, SqlCustomerQuery>();
 builder.Services.AddSingleton<IProductCatalogReader, SqlProductCatalogReader>();
 builder.Services.AddSingleton<IStockReader, SqlStockReader>();
 builder.Services.AddSingleton<IBankAccountsReader, SqlBankAccountsReader>();
+builder.Services.AddSingleton<IBranchesReader, SqlBranchesReader>();
+builder.Services.AddSingleton<ICashRegistersReader, SqlCashRegistersReader>();
 builder.Services.AddSingleton<IDocumentStatusReader, SqlDocumentStatusReader>();
 
 // Idempotency (atomic file store) + audit (SQLite).
@@ -373,6 +375,7 @@ app.MapProductsEndpoints();
 app.MapStockEndpoints();
 app.MapInvoicesEndpoints();
 app.MapBankAccountsEndpoints();
+app.MapBranchesEndpoints();
 app.MapAuditEndpoints();
 
 // Diagnostics introspection endpoints register ONLY when Diagnostics:Enabled AND
