@@ -490,7 +490,7 @@ Lists every Oddzial (`JednostkaOrganizacyjna`), independent of the seller Podmio
 ] } }
 ```
 
-- `id` is the value to pass as `oddzialId` on `POST /api/invoices`.
+- `id` is the value to pass as `oddzialId` on `POST /api/invoices`. Note: the head-office unit (the document's implicit-default branch, `100000` in the demo data used below) is NOT one of the rows returned here — `GET /api/branches` only lists rows from `JednostkiOrganizacyjne_Oddzial`, not the head office itself.
 
 ### `GET /api/cash-registers` — cash-register stations (Stanowiska Kasowe) (issue #5)
 Lists every Stanowisko Kasowe. `oddzialId` is the branch it is explicitly restricted to (via `StanowiskoKasoweJednostkaOrganizacyjna`) — `null` means unlinked. Optional `?oddzialId=` filters to the stations returned as-is by the reader (client-side filter today; use it to find candidates for a given branch, but see the caveat below before relying on an unlinked result for a non-default branch).
@@ -523,7 +523,7 @@ STRICT semantics (any other combination is rejected):
 
 - Vocabulary errors (non-positive ids) are 400 `bad_request` (shape validation).
 - **Why `oddzialId` alone is rejected, not silently defaulted**: live black-box testing showed Sfera's implicit default cash-register resolution (fired when adding a cash/immediate payment) does not scope to a non-default branch — issuing under an explicit `oddzialId` with no explicit station fails deep inside Sfera with no actionable message. Requiring both together avoids ever hitting that failure mode.
-- **Why a mismatched pair is rejected upfront, not auto-confirmed**: Subiekt's own desktop client treats a cross-branch station as a *confirmable warning* ("Stanowisko kasowe nie pochodzi z oddziału ustawionego na dokumencie" / "ZAPISZ MIMO TO"), not a hard block — but a headless API caller has no dialog to click through. The bridge deliberately mirrors the same rule via its own pre-check (before ever calling Sfera) and rejects with a specific message, rather than silently ignoring the warning. Operator decision, 2026-07-02: never auto-accept an unconfirmed mismatch.
+- **Why a mismatched pair is rejected upfront, not auto-confirmed**: Subiekt's own desktop client treats a cross-branch station as a *confirmable warning* ("Stanowisko kasowe nie pochodzi z oddziału ustawionego na dokumencie" / "ZAPISZ MIMO TO"), not a hard block — but a headless API caller has no dialog to click through. The bridge deliberately mirrors the same rule via its own pre-check (before ever calling Sfera) and rejects the request (422), rather than silently ignoring the warning. The specific mismatch reason (which branch the chosen station is actually linked to) is written to the server log; the caller receives the generic `rejected` reason (same as every other write-path rejection), so avoid the rejection proactively by picking a station whose `oddzialId` matches from `GET /api/cash-registers`. Operator decision, 2026-07-02: never auto-accept an unconfirmed mismatch.
 
 ### `POST /api/customers/upsert` — address & dedup
 - Dedup by `nip`: a repeat upsert of an existing NIP returns the existing `id` (keep-existing policy; no overwrite — logged).

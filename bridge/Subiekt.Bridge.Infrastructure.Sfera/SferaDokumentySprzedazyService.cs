@@ -157,8 +157,9 @@ public sealed class SferaDokumentySprzedazyService
         // 6. Recompute netto/VAT split from the manual gross prices.
         _acc.InvokeIfExists(bo, boType, "Przelicz");
 
-        // 5b. Explicit Oddzial/Stanowisko Kasowe selection (issue #5) — set BEFORE the
-        //     payment step (6b), since Sfera's implicit-default cash-register resolution
+        // 6a. Explicit Oddzial/Stanowisko Kasowe selection (issue #5) - runs after the
+        //     netto/VAT recompute (step 6) but BEFORE the payment step (6b), since Sfera's
+        //     implicit-default cash-register resolution
         //     (fired by DodajPlatnoscNatychmiastowa) reads the document's CURRENT branch.
         //     Cross-consistency is verified by SQL BEFORE touching the BO at all -
         //     mirroring Sfera's own StanowiskoKasoweZInnejJednostkiOrganizacyjnejBlad rule
