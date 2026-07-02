@@ -10,8 +10,9 @@ namespace Subiekt.Bridge.Infrastructure.Sql;
 /// s.3): <c>StanowiskoKasowe</c> is a <c>CentraGromadzeniaFinansow</c> TPT subtype (display
 /// name on the base row, like <c>RachunekBankowy</c>); the Oddzial link is a many-to-many
 /// junction table (<c>StanowiskoKasoweJednostkaOrganizacyjna</c>) even though a station is
-/// only ever linked to zero or one Oddzial in practice - <c>LEFT JOIN</c> + <c>TOP 1</c> per
-/// station keeps the query correct if that ever changes.
+/// only ever linked to zero or one Oddzial in practice - a correlated
+/// <c>SELECT TOP 1 ... AS OddzialId</c> subquery per station keeps the query correct if that
+/// ever changes.
 /// </summary>
 public sealed class SqlCashRegistersReader : ICashRegistersReader
 {
