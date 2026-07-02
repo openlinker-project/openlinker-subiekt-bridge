@@ -1,0 +1,697 @@
+// BankAccountProbe - throwaway Phase 0 live probe for issue #1
+// (bank account / payment method per invoice).
+//
+// Subcommands:
+//   explore                     - dump payment/bank-account related surface of the
+//                                 FV business object, its Dane entity and the
+//                                 IFormyPlatnosci / IRachunkiBankowe facades.
+//   baseline                    - create a throwaway FV via the default payment path
+//                                 (DodajPlatnosciDomyslne) and read back payment rows.
+//   transfer --fp N --account N - create FV with DodajPlatnoscOdroczona(FormaPlatnosci)
+//                                 + explicit RachunekBankowyMojejFirmy snapshot.
+//   cash --fp N                 - create FV with DodajPlatnoscNatychmiastowa(FormaPlatnosci).
+//   default-flag --account N    - try flipping the seller default-account flag via a
+//                                 Sfera BO save (stretch-goal gate), then restore.
+//
+// Config: reads the "Sfera" section of the legacy POC appsettings
+// (default C:\subiekt-poc\bridge\SferaApi\appsettings.json, override with --config).
+
+using System.Collections;
+using System.IO;
+using System.Reflection;
+using System.Text.Json;
+using Microsoft.Data.SqlClient;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using Subiekt.Bridge.Infrastructure.Sfera;
+
+var argsList = args.ToList();
+string GetOpt(string name, string fallback)
+{
+    var i = argsList.IndexOf(name);
+    return i >= 0 && i + 1 < argsList.Count ? argsList[i + 1] : fallback;
+}
+
+var command = argsList.FirstOrDefault(a => !a.StartsWith("--")) ?? "explore";
+var configPath = GetOpt("--config", @"C:\subiekt-poc\bridge\SferaApi\appsettings.json");
+
+using var loggerFactory = LoggerFactory.Create(b => b.AddSimpleConsole(o => o.SingleLine = true).SetMinimumLevel(argsList.Contains("--debug") ? LogLevel.Debug : LogLevel.Information));
+var log = loggerFactory.CreateLogger("Probe");
+
+// ---- load Sfera options from the POC appsettings ----
+var json = JsonDocument.Parse(File.ReadAllText(configPath));
+var s = json.RootElement.GetProperty("Sfera");
+var deploymentRoot = GetOpt("--deployment", "");
+var opt = new SferaOptions
+{
+    BinariesDir = deploymentRoot != "" ? deploymentRoot + @"\Binaries" : s.GetProperty("BinariesDir").GetString()!,
+    ConfigDir = deploymentRoot != "" ? deploymentRoot + @"\Config" : s.GetProperty("ConfigDir").GetString()!,
+    TempDir = deploymentRoot != "" ? deploymentRoot + @"\Work" : s.GetProperty("TempDir").GetString()!,
+    DeploymentName = s.GetProperty("DeploymentName").GetString()!,
+    SqlServer = s.GetProperty("SqlServer").GetString()!,
+    SqlDatabase = GetOpt("--db", s.GetProperty("SqlDatabase").GetString()!),
+    SqlUseWindowsAuth = s.GetProperty("SqlUseWindowsAuth").GetBoolean(),
+    SqlEncrypt = false,
+    NexoUser = s.GetProperty("NexoUser").GetString()!,
+    NexoPassword = s.GetProperty("NexoPassword").GetString()!,
+    AutoConnect = false,
+};
+
+var sqlConnString = new SqlConnectionStringBuilder
+{
+    DataSource = opt.SqlServer,
+    InitialCatalog = opt.SqlDatabase,
+    IntegratedSecurity = opt.SqlUseWindowsAuth,
+    Encrypt = false,
+    TrustServerCertificate = true,
+}.ConnectionString;
+
+SferaBoot.InstallAssemblyResolver(opt.BinariesDir);
+
+var session = new SferaSession(Options.Create(opt), loggerFactory.CreateLogger<SferaSession>());
+log.LogInformation("Connecting to Sfera ({db})...", opt.SqlDatabase);
+session.Connect();
+log.LogInformation("Connected.");
+
+var acc = new SferaObjectAccessor(log);
+const BindingFlags F = SferaObjectAccessor.Flags;
+
+try
+{
+    switch (command)
+    {
+        case "explore": Explore(); break;
+        case "baseline": CreateFv(payment: null); break;
+        case "service": ServiceBaseline(); break;
+        case "explore2": Explore2(); break;
+        case "transfer":
+            CreateFv(new PaymentPlan(
+                Kind: "transfer",
+                FormaPlatnosciId: int.Parse(GetOpt("--fp", "2")),
+                BankAccountId: int.Parse(GetOpt("--account", "100007"))));
+            break;
+        case "cash":
+            CreateFv(new PaymentPlan(
+                Kind: "cash",
+                FormaPlatnosciId: int.Parse(GetOpt("--fp", "1")),
+                BankAccountId: null));
+            break;
+        case "default-flag": DefaultFlagProbe(int.Parse(GetOpt("--account", "100007"))); break;
+        default: log.LogError("Unknown command {c}", command); break;
+    }
+}
+finally
+{
+    session.Dispose();
+}
+
+return 0;
+
+// =====================================================================
+
+void DumpMembers(string label, Type t, string[]? keywords = null)
+{
+    Console.WriteLine($"\n===== {label} ({t.FullName}) =====");
+    foreach (var m in t.GetMembers(BindingFlags.Public | BindingFlags.Instance).OrderBy(x => x.MemberType).ThenBy(x => x.Name))
+    {
+        string line = m switch
+        {
+            MethodInfo mi when !mi.IsSpecialName =>
+                $"  method {mi.ReturnType.Name} {mi.Name}({string.Join(", ", mi.GetParameters().Select(p => p.ParameterType.Name + " " + p.Name))})",
+            PropertyInfo pi => $"  prop {pi.PropertyType.Name} {pi.Name} {{ {(pi.CanRead ? "get; " : "")}{(pi.CanWrite ? "set; " : "")}}}",
+            _ => "",
+        };
+        if (line == "") continue;
+        if (keywords is null || keywords.Any(k => line.Contains(k, StringComparison.OrdinalIgnoreCase)))
+            Console.WriteLine(line);
+    }
+}
+
+object GetFacade(string typeName)
+{
+    var t = SferaReflection.RequireType(typeName);
+    return session.Uchwyt.PodajObiektTypu(t);
+}
+
+void Explore()
+{
+    var kw = new[] { "Platnosc", "Platnosci", "Rachun", "Forma", "Kwota", "Dan", "Jednostk", "Kontekst", "UnitOfWork", "Podaj", "Wszystkie", "Znajdz", "Utworz", "Zapisz", "Dane" };
+
+    // 1. Facades
+    foreach (var name in new[]
+    {
+        "InsERT.Moria.Kasa.IFormyPlatnosci, InsERT.Moria.API",
+        "InsERT.Moria.Kasa.IFormyPlatnosciDane, InsERT.Moria.API",
+        "InsERT.Moria.Bank.IRachunkiBankowe, InsERT.Moria.API",
+        "InsERT.Moria.Bank.IRachunkiBankoweDane, InsERT.Moria.API",
+    })
+    {
+        try
+        {
+            var facade = GetFacade(name);
+            DumpMembers("FACADE " + name, facade.GetType());
+            foreach (var iface in facade.GetType().GetInterfaces().Where(i => i.FullName!.Contains("Moria")))
+                DumpMembers("  implements " + iface.Name, iface);
+        }
+        catch (Exception ex) { Console.WriteLine($"FACADE {name}: FAILED - {ex.Message}"); }
+    }
+
+    // 2. FV business object + Dane
+    var iDok = SferaReflection.RequireType("InsERT.Moria.Dokumenty.Logistyka.IDokumentySprzedazy, InsERT.Moria.Dokumenty.Logistyka");
+    var facadeDok = session.Uchwyt.PodajObiektTypu(iDok);
+    var bo = iDok.GetMethod("UtworzFaktureSprzedazy", F)!.Invoke(facadeDok, null)!;
+    DumpMembers("FV BO (payment/account keywords)", bo.GetType(), new[] { "Platnosc", "Rachun", "Forma" });
+
+    var dane = bo.GetType().GetProperty("Dane", F)!.GetValue(bo)!;
+    DumpMembers("FV Dane (payment/account keywords)", dane.GetType(), new[] { "Platnosc", "Rachun", "Forma" });
+
+    // 3. What does DodajPlatnosciDomyslne need - is Dane.RachunkiBankowe preset?
+    Console.WriteLine("\nDane.RachunkiBankowe (fresh BO) = " + (acc.GetProperty(dane, dane.GetType(), "RachunkiBankowe") ?? "NULL"));
+    Console.WriteLine("Dane.FormaPlatnosci (fresh BO)  = " + (acc.GetProperty(dane, dane.GetType(), "FormaPlatnosci") ?? "NULL"));
+}
+
+(int kontrahentId, string symbol) ResolveFixtures()
+{
+    using var conn = new SqlConnection(sqlConnString);
+    conn.Open();
+    int kontrahentId;
+    if (GetOpt("--kontrahent", "") is var k && k != "")
+        kontrahentId = int.Parse(k);
+    else
+    {
+        using var c1 = conn.CreateCommand();
+        c1.CommandText = @"SELECT TOP 1 Id FROM ModelDanychContainer.Podmioty WHERE Typ = 2 AND Podtyp = 7 ORDER BY Id";
+        kontrahentId = (int)c1.ExecuteScalar()!;
+    }
+    using var c2 = conn.CreateCommand();
+    c2.CommandText = @"SELECT TOP 1 a.Symbol FROM ModelDanychContainer.Asortymenty a
+                       JOIN ModelDanychContainer.StanyMagazynowe sm ON sm.Asortyment_Id = a.Id AND sm.IloscDostepna > 1
+                       JOIN ModelDanychContainer.Magazyny m ON m.Id = sm.Magazyn_Id AND m.Symbol = 'MAG'
+                       WHERE a.IsInRecycleBin = 0 ORDER BY a.Id";
+    var symbol = (string?)c2.ExecuteScalar() ?? throw new InvalidOperationException("no product with stock");
+    return (kontrahentId, symbol);
+}
+
+object? ResolveEntityViaDaneContext(object dane, string navProperty, int id, string entityTypeName, string idProp = "Id")
+{
+    // Strategy: EF-attached entity lookup through the Dane entity's data context.
+    // Try well-known context accessors reflectively.
+    var daneType = dane.GetType();
+    foreach (var ctxProp in new[] { "Kontekst", "JednostkaPracy", "UnitOfWork", "DataContext", "Context" })
+    {
+        var p = daneType.GetProperty(ctxProp, F);
+        if (p == null) continue;
+        Console.WriteLine($"  [ctx] Dane.{ctxProp} = {p.GetValue(dane)?.GetType().FullName ?? "NULL"}");
+    }
+    return null;
+}
+
+void Explore2()
+{
+    var iDok2 = SferaReflection.RequireType("InsERT.Moria.Dokumenty.Logistyka.IDokumentySprzedazy, InsERT.Moria.Dokumenty.Logistyka");
+    var fac2 = GetFacade("InsERT.Moria.Dokumenty.Logistyka.IDokumentySprzedazy, InsERT.Moria.Dokumenty.Logistyka");
+    var bo2 = iDok2.GetMethod("UtworzFaktureSprzedazy", F)!.Invoke(fac2, null)!;
+    DumpMembers("FV BO (save/veto keywords)", bo2.GetType(),
+        new[] { "Zapisz", "Mozna", "Komunikat", "Powod", "Blad", "Bledy", "Ostrzez", "Invalid", "Wynik", "Zatwierd" });
+}
+
+void ServiceBaseline()
+{
+    // Proven production path: SferaDokumentySprzedazyService.UtworzFaktura.
+    var (kontrahentId, symbol) = ResolveFixtures();
+    log.LogInformation("Fixtures: kontrahent={k}, symbol={s}", kontrahentId, symbol);
+    var svc = new SferaDokumentySprzedazyService(loggerFactory.CreateLogger<SferaDokumentySprzedazyService>());
+    var input = new SferaInvoiceInput(
+        KontrahentId: kontrahentId,
+        DataSprzedazy: DateTime.Now,
+        DataWydania: DateTime.Now,
+        Lines: new[] { new SferaInvoiceLineInput(symbol, 1m, 123m, "23", null) });
+    var (id, numer) = svc.UtworzFaktura(session, input);
+    log.LogInformation("Service created FV id={id} numer={n}", id, numer);
+    ReadBack(id);
+}
+
+void CreateFv(PaymentPlan? payment)
+{
+    var (kontrahentId, symbol) = ResolveFixtures();
+    log.LogInformation("Fixtures: kontrahent={k}, symbol={s}", kontrahentId, symbol);
+
+    var iDok = SferaReflection.RequireType("InsERT.Moria.Dokumenty.Logistyka.IDokumentySprzedazy, InsERT.Moria.Dokumenty.Logistyka");
+    var facade = session.Uchwyt.PodajObiektTypu(iDok);
+    var bo = iDok.GetMethod("UtworzFaktureSprzedazy", F)!.Invoke(facade, null)!;
+    var boType = bo.GetType();
+    var dane = boType.GetProperty("Dane", F)!.GetValue(bo)!;
+    var daneType = dane.GetType();
+
+    acc.SetBoolFlag(bo, boType, "IgnorujBlokade", true);
+    acc.SetBoolFlag(bo, boType, "WylaczBlokowanieStanowPrzezRezerwacjeIlosciowa", true);
+    acc.SetBoolFlag(bo, boType, "NieSprawdzajRealizacji", true);
+
+    boType.GetMethod("UstawNabywceWedlugId", F, new[] { typeof(int) })!.Invoke(bo, new object[] { kontrahentId });
+    acc.SetProperty(dane, daneType, "DataSprzedazy", DateTime.Now);
+    acc.SetProperty(dane, daneType, "DataWydaniaWystawienia", DateTime.Now);
+
+    var poz = boType.GetMethod("Dodaj", F, new[] { typeof(string) })!.Invoke(bo, new object[] { symbol })!;
+    acc.SetProperty(poz, poz.GetType(), "Ilosc", 1m);
+    var cena = poz.GetType().GetProperty("Cena", F)?.GetValue(poz);
+    if (cena is not null)
+    {
+        acc.SetProperty(cena, cena.GetType(), "BruttoPrzedRabatem", 123m);
+        acc.SetProperty(cena, cena.GetType(), "BruttoPoRabacie", 123m);
+        acc.SetProperty(poz, poz.GetType(), "CenaRecznieEdytowana", true);
+    }
+
+    acc.InvokeIfExists(bo, boType, "Przelicz");
+
+    if (payment is null)
+    {
+        log.LogInformation("BASELINE: DodajPlatnosciDomyslne + Natychmiastowa (deep diagnostics)");
+        try { boType.GetMethod("DodajPlatnosciDomyslne", F, Type.EmptyTypes)?.Invoke(bo, null); log.LogInformation("DodajPlatnosciDomyslne OK"); }
+        catch (TargetInvocationException tie) { log.LogError("DodajPlatnosciDomyslne threw: {t}: {m}", tie.InnerException?.GetType().Name, tie.InnerException?.Message); }
+        try { boType.GetMethod("DodajDomyslnaPlatnoscNatychmiastowaNaKwoteDokumentu", F, Type.EmptyTypes)?.Invoke(bo, null); log.LogInformation("DodajDomyslnaPlatnoscNatychmiastowa OK"); }
+        catch (TargetInvocationException tie)
+        {
+            log.LogError("DodajDomyslnaPlatnoscNatychmiastowa threw: {t}: {m}\n{st}",
+                tie.InnerException?.GetType().Name, tie.InnerException?.Message,
+                tie.InnerException?.StackTrace?.Split('\n').FirstOrDefault());
+        }
+
+        DumpPayments(dane, daneType);
+        RemoveInvalidZeroPayments(bo, boType, dane, daneType);
+        DumpPayments(dane, daneType);
+    }
+    else
+    {
+        ApplyPayment(bo, boType, dane, daneType, payment);
+    }
+
+    acc.InvokeIfExists(bo, boType, "IgnorujBlokadeRealizacjiPozycji");
+    acc.InvokeIfExists(bo, boType, "AutoSymbol");
+    acc.InvokeIfExists(bo, boType, "NadajNumer");
+
+    var waliduj = boType.GetMethod("Waliduj", F, Type.EmptyTypes);
+    try { waliduj?.Invoke(bo, null); log.LogInformation("Waliduj OK"); }
+    catch (TargetInvocationException tie) { log.LogError("Waliduj FAILED: {m}", tie.InnerException?.Message); }
+
+    var saved = boType.GetMethod("Zapisz", F, Type.EmptyTypes)!.Invoke(bo, null);
+    log.LogInformation("Zapisz() = {r}", saved);
+    if (saved is not true)
+    {
+        log.LogError("Save failed: {e}", acc.CollectValidationErrors(bo, boType, includeDocumentLevel: true, includeStateHint: true));
+        try
+        {
+            if (boType.GetProperty("InvalidData", F)?.GetValue(bo) is IEnumerable inv)
+                foreach (var ent in inv)
+                {
+                    if (ent is null) continue;
+                    Console.WriteLine("  [InvalidData] " + Describe(ent));
+                    if (ent is System.ComponentModel.IDataErrorInfo dei)
+                        foreach (var p in ent.GetType().GetProperties(F))
+                        {
+                            if (p.GetIndexParameters().Length > 0) continue;
+                            string? err = null;
+                            try { err = dei[p.Name]; } catch { }
+                            if (!string.IsNullOrEmpty(err)) Console.WriteLine($"    [IDataErrorInfo] {p.Name}: {err}");
+                        }
+                }
+        }
+        catch (Exception ex) { log.LogWarning("InvalidData dump failed: {m}", ex.Message); }
+        return;
+    }
+
+    var id = (int)acc.GetProperty(dane, daneType, "Id")!;
+    log.LogInformation("Saved FV id={id}", id);
+    ReadBack(id);
+}
+
+void ApplyPayment(object bo, Type boType, object dane, Type daneType, PaymentPlan plan)
+{
+    log.LogInformation("PAYMENT PLAN: {kind} fp={fp} account={acc}", plan.Kind, plan.FormaPlatnosciId, plan.BankAccountId);
+
+    // Resolve the FormaPlatnosci ENTITY inside the DOCUMENT's own unit of work:
+    // set the FK and let EF fixup materialize the nav (fresh BO context has lazy
+    // loading). Fallback: facade Znajdz(expression) -> BO -> .Dane entity.
+    var fp = ResolveFormaPlatnosci(dane, plan.FormaPlatnosciId)
+        ?? throw new InvalidOperationException($"could not resolve FormaPlatnosci {plan.FormaPlatnosciId}");
+    log.LogInformation("Resolved FormaPlatnosci: '{n}' (Id={id})",
+        acc.GetProperty(fp, fp.GetType(), "Nazwa"), acc.GetProperty(fp, fp.GetType(), "Id"));
+
+    // Set the document's payment form.
+    try { daneType.GetProperty("FormaPlatnosci", F)?.SetValue(dane, fp); log.LogInformation("Dane.FormaPlatnosci set"); }
+    catch (Exception ex) { log.LogWarning("Dane.FormaPlatnosci set failed: {m}", ex.Message); }
+
+    // Explicit payment via the IPlatnosciNaDokumencie interface (methods are
+    // explicitly implemented on the BO, so lookup must go through the interface type).
+    Type iPlatnosci;
+    try { iPlatnosci = SferaReflection.RequireType("InsERT.Moria.Dokumenty.Logistyka.IPlatnosciNaDokumencie, InsERT.Moria.API"); }
+    catch { iPlatnosci = SferaReflection.RequireType("InsERT.Moria.Dokumenty.Logistyka.IPlatnosciNaDokumencie, InsERT.Moria.Dokumenty.Logistyka"); }
+
+    var fpEntityType2 = SferaReflection.RequireType("InsERT.Moria.ModelDanych.FormaPlatnosci, InsERT.Moria.ModelDanych");
+    var addName = plan.Kind == "cash" ? "DodajPlatnoscNatychmiastowa" : "DodajPlatnoscOdroczona";
+    var add = iPlatnosci.GetMethods()
+        .FirstOrDefault(m => m.Name == addName
+            && m.GetParameters().Length == 1
+            && m.GetParameters()[0].ParameterType == fpEntityType2)
+        ?? throw new InvalidOperationException($"{addName}(FormaPlatnosci) not found on {iPlatnosci.Name}");
+    try
+    {
+        var result = add.Invoke(bo, new[] { fp });
+        log.LogInformation("{m}(fp) via interface -> {t}", addName, result?.GetType().Name ?? "null");
+    }
+    catch (TargetInvocationException tie) { log.LogError("{m} threw: {e}", addName, tie.InnerException?.Message); }
+
+    // Re-assert the document's payment form after the payment add.
+    try { daneType.GetProperty("FormaPlatnosci", F)?.SetValue(dane, fp); } catch { }
+
+    if (plan.Kind == "transfer" && plan.BankAccountId is int accountId)
+    {
+        string accName, accNumber;
+        using (var conn = new SqlConnection(sqlConnString))
+        {
+            conn.Open();
+            using var c = conn.CreateCommand();
+            c.CommandText = @"SELECT cgf.Nazwa, rb.Numer FROM ModelDanychContainer.CentraGromadzeniaFinansow_RachunekBankowy rb
+                              JOIN ModelDanychContainer.CentraGromadzeniaFinansow cgf ON cgf.Id = rb.Id WHERE rb.Id = @id";
+            c.Parameters.AddWithValue("@id", accountId);
+            using var r = c.ExecuteReader();
+            if (!r.Read()) throw new InvalidOperationException($"bank account {accountId} not found");
+            accName = r.GetString(0);
+            accNumber = r.GetString(1);
+        }
+        log.LogInformation("Selected seller account: '{n}' {num}", accName, accNumber);
+
+        // Write the seller-account SNAPSHOT on the document (RachunekBankowyDokumentu
+        // is 1:1 with the document and pre-attached on a fresh BO).
+        var rbd = daneType.GetProperty("RachunkiBankowe", F)?.GetValue(dane);
+        if (rbd is null) { log.LogWarning("Dane.RachunkiBankowe is NULL"); }
+        else
+        {
+            var mfProp = rbd.GetType().GetProperty("RachunekBankowyMojejFirmy", F)!;
+            var snapshot = mfProp.GetValue(rbd);
+            if (snapshot is null)
+            {
+                var snapType = SferaReflection.RequireType("InsERT.Moria.ModelDanych.DaneRachunkuBankowego, InsERT.Moria.ModelDanych");
+                snapshot = Activator.CreateInstance(snapType)!;
+                if (mfProp.CanWrite) mfProp.SetValue(rbd, snapshot);
+            }
+            acc.SetProperty(snapshot, snapshot.GetType(), "Nazwa", accName);
+            acc.SetProperty(snapshot, snapshot.GetType(), "Numer", accNumber);
+            log.LogInformation("Seller-account snapshot set: '{n}' {num}", accName, accNumber);
+        }
+    }
+
+    DumpPayments(dane, daneType);
+    RemoveInvalidZeroPayments(bo, boType, dane, daneType);
+    DumpPayments(dane, daneType);
+}
+
+void DumpPayments(object dane, Type daneType)
+{
+    try
+    {
+        if (acc.GetProperty(dane, daneType, "PlatnosciDokumentow") is IEnumerable rows)
+            foreach (var row in rows)
+            {
+                Console.WriteLine("  [payment] " + Describe(row));
+                if (row is System.ComponentModel.IDataErrorInfo dei)
+                    foreach (var p in row.GetType().GetProperties(F))
+                    {
+                        if (p.GetIndexParameters().Length > 0) continue;
+                        string? err = null;
+                        try { err = dei[p.Name]; } catch { }
+                        if (!string.IsNullOrEmpty(err)) Console.WriteLine($"    [IDataErrorInfo] {p.Name}: {err}");
+                    }
+            }
+    }
+    catch (Exception ex) { log.LogWarning("payment dump failed: {m}", ex.Message); }
+}
+
+// The demo environment's DodajPlatnosciDomyslne emits a stray zero-amount payment
+// row that fails entity validation and vetoes Zapisz(). Remove zero rows via the
+// BO's own payments API (bo.Platnosci.Usun).
+void RemoveInvalidZeroPayments(object bo, Type boType, object dane, Type daneType)
+{
+    try
+    {
+        var platnosci = boType.GetProperty("Platnosci", F)?.GetValue(bo);
+        if (platnosci is null) { log.LogWarning("bo.Platnosci is null"); return; }
+        var platnoscType = SferaReflection.RequireType("InsERT.Moria.ModelDanych.PlatnoscDokumentu, InsERT.Moria.ModelDanych");
+        var usun = platnosci.GetType().GetMethods(BindingFlags.Public | BindingFlags.Instance)
+            .FirstOrDefault(m => m.Name == "Usun"
+                && m.GetParameters().Length == 1
+                && m.GetParameters()[0].ParameterType == platnoscType);
+        if (usun is null) { log.LogWarning("Platnosci.Usun(PlatnoscDokumentu) not found"); return; }
+
+        if (acc.GetProperty(dane, daneType, "PlatnosciDokumentow") is not IEnumerable rows) return;
+        var toRemove = new List<object>();
+        foreach (var row in rows)
+        {
+            var kwota = acc.GetProperty(row, row.GetType(), "KwotaPlatnosci");
+            if (kwota is decimal d && d == 0m) toRemove.Add(row);
+        }
+        foreach (var row in toRemove)
+        {
+            usun.Invoke(platnosci, new[] { row });
+            log.LogInformation("Removed zero-amount payment row");
+        }
+    }
+    catch (Exception ex) { log.LogWarning("RemoveInvalidZeroPayments failed: {m}", ex.InnerException?.Message ?? ex.Message); }
+}
+
+string Describe(object entity)
+{
+    var t = entity.GetType();
+    var parts = new List<string>();
+    foreach (var name in new[] { "Id", "Kwota", "KwotaPlatnosci", "KwotaDokumentu", "TerminPlatnosci", "Termin", "Rodzaj", "Typ" })
+    {
+        var p = t.GetProperty(name, F);
+        if (p?.GetIndexParameters().Length == 0)
+        {
+            object? v = null;
+            try { v = p.GetValue(entity); } catch { }
+            if (v is not null) parts.Add($"{name}={v}");
+        }
+    }
+    var fpProp = t.GetProperty("FormaPlatnosci", F);
+    if (fpProp is not null)
+    {
+        try
+        {
+            var fp = fpProp.GetValue(entity);
+            if (fp is not null) parts.Add($"FormaPlatnosci={acc.GetProperty(fp, fp.GetType(), "Nazwa")}");
+        }
+        catch { }
+    }
+    return $"{t.Name}: {string.Join(" ", parts)}";
+}
+
+object? ResolveFormaPlatnosci(object dane, int fpId)
+{
+    var daneType = dane.GetType();
+
+    // Strategy 1: set the FK on the document entity and let EF fixup/lazy-load
+    // materialize the nav INSIDE the document's own unit of work.
+    try
+    {
+        var idProp = daneType.GetProperty("FormaPlatnosciId", F);
+        if (idProp is not null)
+        {
+            idProp.SetValue(dane, fpId);
+            var nav = daneType.GetProperty("FormaPlatnosci", F)?.GetValue(dane);
+            if (nav is not null && Equals(acc.GetProperty(nav, nav.GetType(), "Id"), fpId))
+            {
+                log.LogInformation("Strategy 1 (FK fixup) resolved FormaPlatnosci {id}", fpId);
+                return nav;
+            }
+            log.LogInformation("Strategy 1 (FK fixup): nav = {v}", nav is null ? "NULL" : "wrong id");
+        }
+    }
+    catch (Exception ex) { log.LogWarning("Strategy 1 failed: {m}", ex.Message); }
+
+    // Strategy 2: facade Znajdz(Expression<Func<FormaPlatnosci,bool>>) -> IFormaPlatnosci BO -> .Dane entity.
+    try
+    {
+        var fpType = SferaReflection.RequireType("InsERT.Moria.ModelDanych.FormaPlatnosci, InsERT.Moria.ModelDanych");
+        var facade = GetFacade("InsERT.Moria.Kasa.IFormyPlatnosci, InsERT.Moria.API");
+        var param = System.Linq.Expressions.Expression.Parameter(fpType, "x");
+        var body = System.Linq.Expressions.Expression.Equal(
+            System.Linq.Expressions.Expression.Property(param, "Id"),
+            System.Linq.Expressions.Expression.Constant(fpId));
+        var funcType = typeof(Func<,>).MakeGenericType(fpType, typeof(bool));
+        var lambda = System.Linq.Expressions.Expression.Lambda(funcType, body, param);
+        var exprType = typeof(System.Linq.Expressions.Expression<>).MakeGenericType(funcType);
+
+        var znajdz = facade.GetType().GetMethods(BindingFlags.Public | BindingFlags.Instance)
+            .FirstOrDefault(m => m.Name == "Znajdz"
+                && m.GetParameters().Length == 1
+                && m.GetParameters()[0].ParameterType == exprType);
+        if (znajdz is null) { log.LogWarning("Strategy 2: no Znajdz(Expression) overload"); return null; }
+
+        var fpBo = znajdz.Invoke(facade, new object[] { lambda });
+        if (fpBo is null) { log.LogWarning("Strategy 2: Znajdz returned null"); return null; }
+        var entity = fpBo.GetType().GetProperty("Dane", F)?.GetValue(fpBo);
+        log.LogInformation("Strategy 2 (facade Znajdz) resolved: {t}", entity?.GetType().Name ?? "NULL");
+        return entity;
+    }
+    catch (Exception ex)
+    {
+        log.LogWarning("Strategy 2 failed: {m}", ex.InnerException?.Message ?? ex.Message);
+        return null;
+    }
+}
+
+void ReadBack(int docId)
+{
+    using var conn = new SqlConnection(sqlConnString);
+    conn.Open();
+
+    Console.WriteLine($"\n===== READ-BACK doc {docId} =====");
+
+    void Dump(string title, string sql)
+    {
+        Console.WriteLine($"\n--- {title} ---");
+        try
+        {
+            using var c = conn.CreateCommand();
+            c.CommandText = sql;
+            c.Parameters.AddWithValue("@id", docId);
+            using var r = c.ExecuteReader();
+            while (r.Read())
+            {
+                var parts = new List<string>();
+                for (var i = 0; i < r.FieldCount; i++)
+                    parts.Add($"{r.GetName(i)}={(r.IsDBNull(i) ? "NULL" : r.GetValue(i))}");
+                Console.WriteLine("  " + string.Join(" | ", parts));
+            }
+        }
+        catch (Exception ex) { Console.WriteLine("  ERROR: " + ex.Message); }
+    }
+
+    // Discover payment-related columns on Dokumenty, then select them for the doc.
+    var cols = new List<string> { "NumerWewnetrzny_PelnaSygnatura" };
+    using (var cc = conn.CreateCommand())
+    {
+        cc.CommandText = @"SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+                           WHERE TABLE_SCHEMA='ModelDanychContainer' AND TABLE_NAME='Dokumenty'
+                             AND (COLUMN_NAME LIKE '%FormaPlatnosci%' OR COLUMN_NAME LIKE '%Rachun%')";
+        using var r = cc.ExecuteReader();
+        while (r.Read()) cols.Add(r.GetString(0));
+    }
+    Dump("Dokumenty payment columns",
+        $"SELECT {string.Join(", ", cols.Select(c => "[" + c + "]"))} FROM ModelDanychContainer.Dokumenty WHERE Id = @id");
+
+    Dump("FormyPlatnosciDokumentu",
+        @"SELECT * FROM ModelDanychContainer.FormyPlatnosciDokumentu WHERE Dokument_Id = @id");
+    Dump("PlatnosciDokumentow",
+        @"SELECT DokumentId, LP, KwotaDokumentu, KwotaPlatnosci, RodzajPlatnosci, Termin, TerminDni, FormaPlatnosci_Id
+          FROM ModelDanychContainer.PlatnosciDokumentow WHERE DokumentId = @id");
+    Dump("RachunkiBankoweDokumentow (1:1 by doc id)",
+        @"SELECT Id, RachunekBankowyMojejFirmy_Nazwa, RachunekBankowyMojejFirmy_Numer
+          FROM ModelDanychContainer.RachunkiBankoweDokumentow WHERE Id = @id");
+}
+
+void DefaultFlagProbe(int accountId)
+{
+    // Read current state
+    using (var conn = new SqlConnection(sqlConnString))
+    {
+        conn.Open();
+        using var c = conn.CreateCommand();
+        c.CommandText = @"SELECT Id, PodstawowyDlaWaluty, WlascicielPodstawowego_Id, Wlasciciel_Id
+                          FROM ModelDanychContainer.CentraGromadzeniaFinansow_RachunekBankowy WHERE Id = @id";
+        c.Parameters.AddWithValue("@id", accountId);
+        using var r = c.ExecuteReader();
+        while (r.Read())
+            Console.WriteLine($"BEFORE: Id={r.GetInt32(0)} PodstawowyDlaWaluty={r.GetBoolean(1)} WlascicielPodstawowego={(r.IsDBNull(2) ? "NULL" : r.GetInt32(2))} Wlasciciel={(r.IsDBNull(3) ? "NULL" : r.GetInt32(3))}");
+    }
+
+    // The "Podstawowy" flag is owned by the PODMIOT side (Podmiot.RachunekPodstawowy);
+    // the RachunekBankowy BO does not sponsor WlascicielPodstawowego (verified:
+    // UnsponsoredModificationException). Load the OWNER's Podmiot business object.
+    int ownerId;
+    using (var conn = new SqlConnection(sqlConnString))
+    {
+        conn.Open();
+        using var c = conn.CreateCommand();
+        c.CommandText = @"SELECT Wlasciciel_Id FROM ModelDanychContainer.CentraGromadzeniaFinansow_RachunekBankowy WHERE Id = @id";
+        c.Parameters.AddWithValue("@id", accountId);
+        ownerId = (int)c.ExecuteScalar()!;
+    }
+
+    var podmiotType = SferaReflection.RequireType("InsERT.Moria.ModelDanych.Podmiot, InsERT.Moria.ModelDanych");
+    var podmiotBo = FindByIdViaFacade("InsERT.Moria.Klienci.IPodmioty, InsERT.Moria.Klienci", podmiotType, ownerId)
+        ?? throw new InvalidOperationException($"podmiot {ownerId} not found via facade");
+    var podmiotEntity = podmiotBo.GetType().GetProperty("Dane", F)!.GetValue(podmiotBo)!;
+    var pet = podmiotEntity.GetType();
+
+    var beforeRb = acc.GetProperty(podmiotEntity, pet, "RachunekPodstawowy");
+    Console.WriteLine($"Podmiot {ownerId} RachunekPodstawowy(before) = {(beforeRb is null ? "NULL" : acc.GetProperty(beforeRb, beforeRb.GetType(), "Id"))}");
+
+    // Find the target account entity in the podmiot's OWN context (its RachunkiBankowe collection).
+    object? targetInCtx = null;
+    if (acc.GetProperty(podmiotEntity, pet, "Rachunki") is IEnumerable rbs)
+        foreach (var rb in rbs)
+        {
+            Console.WriteLine($"  [podmiot.Rachunki] Id={acc.GetProperty(rb, rb.GetType(), "Id")} Numer={acc.GetProperty(rb, rb.GetType(), "Numer")}");
+            if (Equals(acc.GetProperty(rb, rb.GetType(), "Id"), accountId)) { targetInCtx = rb; }
+        }
+    if (targetInCtx is null)
+    {
+        foreach (var p in pet.GetProperties(F).Where(p => p.Name.Contains("Rachun", StringComparison.OrdinalIgnoreCase)))
+            Console.WriteLine($"  [Podmiot prop] {p.PropertyType.Name} {p.Name}");
+        throw new InvalidOperationException($"account {accountId} not in podmiot.RachunkiBankowe");
+    }
+
+    acc.SetProperty(podmiotEntity, pet, "RachunekPodstawowy", targetInCtx);
+    var saveOk = podmiotBo.GetType().GetMethod("Zapisz", F, Type.EmptyTypes)?.Invoke(podmiotBo, null);
+    Console.WriteLine($"Podmiot.Zapisz() after set = {saveOk}");
+
+    var beforeRbId = beforeRb is null ? (int?)null : (int)acc.GetProperty(beforeRb, beforeRb.GetType(), "Id")!;
+
+    using (var conn = new SqlConnection(sqlConnString))
+    {
+        conn.Open();
+        using var c = conn.CreateCommand();
+        c.CommandText = @"SELECT Id, WlascicielPodstawowego_Id, PodstawowyDlaWaluty
+                          FROM ModelDanychContainer.CentraGromadzeniaFinansow_RachunekBankowy WHERE Wlasciciel_Id = (
+                            SELECT Wlasciciel_Id FROM ModelDanychContainer.CentraGromadzeniaFinansow_RachunekBankowy WHERE Id = @id)";
+        c.Parameters.AddWithValue("@id", accountId);
+        using var r = c.ExecuteReader();
+        while (r.Read())
+            Console.WriteLine($"AFTER: Id={r.GetInt32(0)} WlascicielPodstawowego={(r.IsDBNull(1) ? "NULL" : r.GetInt32(1))} PodstawowyDlaWaluty={r.GetBoolean(2)}");
+    }
+
+    // Restore the previous primary account (leaves the DB as we found it).
+    if (saveOk is true)
+    {
+        var restoreBo = FindByIdViaFacade("InsERT.Moria.Klienci.IPodmioty, InsERT.Moria.Klienci", podmiotType, ownerId)!;
+        var restoreEntity = restoreBo.GetType().GetProperty("Dane", F)!.GetValue(restoreBo)!;
+        object? restoreTarget = null;
+        if (beforeRbId is int prevId && acc.GetProperty(restoreEntity, restoreEntity.GetType(), "Rachunki") is IEnumerable rbs2)
+            foreach (var rb in rbs2)
+                if (Equals(acc.GetProperty(rb, rb.GetType(), "Id"), prevId)) { restoreTarget = rb; break; }
+        acc.SetProperty(restoreEntity, restoreEntity.GetType(), "RachunekPodstawowy", restoreTarget);
+        var restoreOk = restoreBo.GetType().GetMethod("Zapisz", F, Type.EmptyTypes)?.Invoke(restoreBo, null);
+        Console.WriteLine($"Restore Zapisz() = {restoreOk} (RachunekPodstawowy -> {(beforeRbId?.ToString() ?? "NULL")})");
+    }
+}
+
+object? FindByIdViaFacade(string facadeTypeName, Type entityType, int id)
+{
+    var facade = GetFacade(facadeTypeName);
+    var param = System.Linq.Expressions.Expression.Parameter(entityType, "x");
+    var body = System.Linq.Expressions.Expression.Equal(
+        System.Linq.Expressions.Expression.Property(param, "Id"),
+        System.Linq.Expressions.Expression.Constant(id));
+    var funcType = typeof(Func<,>).MakeGenericType(entityType, typeof(bool));
+    var lambda = System.Linq.Expressions.Expression.Lambda(funcType, body, param);
+    var exprType = typeof(System.Linq.Expressions.Expression<>).MakeGenericType(funcType);
+    var znajdz = facade.GetType().GetMethods(BindingFlags.Public | BindingFlags.Instance)
+        .FirstOrDefault(m => m.Name == "Znajdz"
+            && m.GetParameters().Length == 1
+            && m.GetParameters()[0].ParameterType == exprType);
+    if (znajdz is null) { log.LogWarning("no Znajdz(Expression<Func<{t},bool>>) on facade", entityType.Name); return null; }
+    return znajdz.Invoke(facade, new object[] { lambda });
+}
+
+record PaymentPlan(string Kind, int FormaPlatnosciId, int? BankAccountId);

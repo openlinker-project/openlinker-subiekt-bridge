@@ -88,12 +88,17 @@
 - `Dokument` family: `FormaPlatnosci` / `FormaPlatnosciId` (nullable int, line ~2797-2798), `FormyPlatnosci` (collection of `FormaPlatnosciDokumentu`), `RachunekBankowyKlienta` (+Id), `RachunkiBankowe` of type `RachunekBankowyDokumentu` (line ~2920) - the issue's `RachunekBankowyDokumentu.RachunekBankowyMojejFirmy` path.
 - Expected SQL tables (naming convention observed for other entities): `ModelDanychContainer.RachunkiBankowe`, `ModelDanychContainer.FormyPlatnosci`. Exact table/column names are **unconfirmed** until Phase 0.
 
-### Two candidate wiring mechanisms for the per-invoice override
+### Wiring mechanism for the per-invoice override - VERIFIED LIVE (2026-07-02)
 
-1. **FormaPlatnosci route**: resolve the transfer/cash `FormaPlatnosci` row (D6), set it on the document (via a BO method like `DodajPlatnosc(...)` or `Dane.FormaPlatnosciId`), and for transfer additionally point the document's `RachunkiBankowe.RachunekBankowyMojejFirmy` at the selected `RachunekBankowy`.
-2. **RachunekBankowyDokumentu route only**: keep `DodajPlatnosciDomyslne()` for the payment rows but overwrite `Dane.RachunkiBankowe.RachunekBankowyMojejFirmy`.
+Phase 0 ran on the live demo (FS 176/178/179 in `Nexo_Demo_1`); full evidence in `docs/spikes/bank-account-probe-findings.md`. The confirmed sequence for an explicit selection:
 
-Phase 0 decides which one actually takes effect on a saved document (checked via `RachunekBankowyDokumentu` read-back + the Subiekt UI). Default plan assumption: route 1 for the payment row + explicitly setting the document's bank account, because cash-vs-transfer selection inherently requires controlling the `FormaPlatnosci`, not just the account.
+1. Resolve the `FormaPlatnosci` entity INSIDE the document's unit of work via FK fixup (`Dane.FormaPlatnosciId = id` then read `Dane.FormaPlatnosci`). Facade-resolved entities live in a different ObjectContext and must not be assigned across contexts.
+2. Add the payment row through the `IPlatnosciNaDokumencie` interface (explicitly implemented on the BO - reflection lookup must go through the interface type): transfer -> `DodajPlatnoscOdroczona(FormaPlatnosci)`, cash -> `DodajPlatnoscNatychmiastowa(FormaPlatnosci)`.
+3. Set `Dane.FormaPlatnosci` so the document header carries the chosen form.
+4. Transfer only: write the seller-account snapshot `Dane.RachunkiBankowe.RachunekBankowyMojejFirmy` (`DaneRachunkuBankowego { Nazwa, Numer }`; the 1:1 `RachunekBankowyDokumentu` row is pre-attached on a fresh BO).
+5. Do NOT call `DodajPlatnosciDomyslne()` on the explicit path - it derives from configuration and ignores `Dane.FormaPlatnosci`.
+
+Dead end (verified): `AktualizujRachunkiBankowe(string[], out string)` updates the BUYER's accounts, not the seller's.
 
 ### Internal patterns followed
 - Read endpoints: `StockEndpoints` -> `IStockReader` -> `SqlStockReader` (no use-case layer for pure reads; endpoint calls the port directly).
@@ -105,12 +110,12 @@ Phase 0 decides which one actually takes effect on a saved document (checked via
 
 ## 5. Questions & Assumptions
 
-### Open questions (answered by Phase 0, not blockers for starting)
-- **Q1**: Exact SQL table/column names for `RachunkiBankowe` / `FormyPlatnosci` (including how `Waluta` is joined and whether `Wlasciciel_Id` or `MojaFirmaId` scopes seller accounts).
-- **Q2**: Which wiring mechanism (route 1 vs route 2 above) actually lands the account on the saved document.
-- **Q3**: Does the document BO expose a payment-add method that accepts a `FormaPlatnosci` (e.g. `DodajPlatnosc`), or must `Dane.FormaPlatnosciId` be set before `DodajPlatnosciDomyslne`-equivalent recompute?
-- **Q4**: Is `PodstawowyDlaWaluty` writable through a Sfera BO save (stretch D7)? If only raw SQL would work, the stretch is dropped (bridge policy: no raw-SQL writes).
-- **Q5**: Default `FormaPlatnosci` names on a stock Polish install - confirm `gotówka` / `przelew` defaults for D6.
+### Open questions - ALL ANSWERED by the Phase 0 live probe (2026-07-02, see `docs/spikes/bank-account-probe-findings.md`)
+- **Q1** ANSWERED: accounts live in `CentraGromadzeniaFinansow_RachunekBankowy` (TPT subtype; name on the base table), currency via `Waluta_Id -> Waluty.Symbol`, seller scoping via `Wlasciciel_Id = <MojaFirma Podmiot>` (`Typ=2, Podtyp=11`). The UI "Podstawowy" flag is `WlascicielPodstawowego_Id IS NOT NULL`, NOT `PodstawowyDlaWaluty`.
+- **Q2** ANSWERED: FormaPlatnosci on the header + explicit payment row + seller-account snapshot (`RachunekBankowyMojejFirmy {Nazwa, Numer}` on the 1:1 `RachunekBankowyDokumentu`). Verified end-to-end on FS 178.
+- **Q3** ANSWERED: `IPlatnosciNaDokumencie.DodajPlatnoscOdroczona(FormaPlatnosci)` / `DodajPlatnoscNatychmiastowa(FormaPlatnosci)` (interface-typed lookup); FormaPlatnosci resolved via FK fixup in the document's UoW. `DodajPlatnosciDomyslne` ignores `Dane.FormaPlatnosci` and must not be used on the explicit path.
+- **Q4** ANSWERED - stretch STAYS IN SCOPE: the default flip works via the Podmiot BO (`IPodmioty.Znajdz` -> `Dane.RachunekPodstawowy = <account from Dane.Rachunki>` -> `Zapisz()`); previous default clears automatically. Direct write of `RachunekBankowy.WlascicielPodstawowego` is unsponsored (throws) - dead end, avoided.
+- **Q5** ANSWERED: stock install ships `Gotówka` (Id 1) and `Przelew` (Id 2, type "Płatność odroczona", 7-day term). D6 name-based config defaults hold.
 
 ### Assumptions (safe defaults)
 - **A1**: `bankAccountId` on the wire is the Subiekt `RachunkiBankowe.Id` (int) - the same id the list endpoint returns. No separate identifier mapping (bridge is single-tenant, ids are provider-native, consistent with `KontrahentId`).
@@ -126,7 +131,8 @@ Phase 0 decides which one actually takes effect on a saved document (checked via
 
 ## 6. Proposed Implementation Plan
 
-### Phase 0 - Live probe (Windows machine, throwaway)
+### Phase 0 - Live probe (Windows machine, throwaway) - DONE 2026-07-02
+**Status**: COMPLETED. Tool: `bridge/tools/BankAccountProbe`; findings: `docs/spikes/bank-account-probe-findings.md` (+ posted to issue #1). Evidence documents FS 176/178/179 in the demo DB. All Phase 0 steps below were executed; the sub-steps are kept for the record.
 **Goal**: convert every "static dump says" into "live Subiekt confirms" before writing production code. Deliverable: findings appended to issue #1.
 
 1. **SQL schema probe**
@@ -164,7 +170,7 @@ Phase 0 decides which one actually takes effect on a saved document (checked via
 ### Phase 3 - Infrastructure.Sql (read path)
 1. **`SqlBankAccountsReader`**
    - **File**: `bridge/Subiekt.Bridge.Infrastructure.Sql/SqlBankAccountsReader.cs`
-   - **Action**: Dapper query (exact SQL from Phase 0) over `ModelDanychContainer.RachunkiBankowe` (+ currency join), filtered to active seller-owned accounts, ordered by `PodstawowyDlaWaluty DESC, Numer`. Errors classified via `SqlErrorClassifier` (mirrors `SqlStockReader`).
+   - **Action**: Dapper query (verified SQL in `docs/spikes/bank-account-probe-findings.md` s.1) over `CentraGromadzeniaFinansow_RachunekBankowy` JOIN `CentraGromadzeniaFinansow` (name) LEFT JOIN `Waluty`, scoped to `Wlasciciel_Id = <MojaFirma Podmiot>` and `Aktywny = 1`, with `isDefault = (WlascicielPodstawowego_Id IS NOT NULL)`, ordered default-first. Errors classified via `SqlErrorClassifier` (mirrors `SqlStockReader`).
    - **Acceptance**: returns the same rows as the Phase 0 probe on the live machine.
 
 ### Phase 4 - Infrastructure.Sfera (write path)
@@ -181,12 +187,12 @@ Phase 0 decides which one actually takes effect on a saved document (checked via
    - **File**: `bridge/Subiekt.Bridge.Infrastructure.Sfera/SferaDokumentySprzedazyService.cs` (step 6b, currently lines 151-153)
    - **Action**:
      - No `Payment` -> today's two `InvokeIfExists` calls, verbatim (regression guard).
-     - `Payment` present -> SQL pre-checks: bank account exists + active + currency matches document (A3/A4); resolve the configured `FormaPlatnosci` row by name (D6) and fail `rejected` when missing/inactive; then apply the Phase-0-confirmed mechanism (default assumption: set the resolved `FormaPlatnosci` on the document, add the payment row - immediate for cash per A5 - and for transfer set `RachunkiBankowe.RachunekBankowyMojejFirmy` to the selected account).
+     - `Payment` present -> SQL pre-checks: bank account exists + active + currency matches document (A3/A4); resolve the configured `FormaPlatnosci` row by name (D6) and fail `rejected` when missing/inactive; then apply the Phase-0-CONFIRMED mechanism (findings s.3): FK-fixup the `FormaPlatnosci` entity in the document's UoW, add the payment via `IPlatnosciNaDokumencie.DodajPlatnoscOdroczona(fp)` (transfer) / `DodajPlatnoscNatychmiastowa(fp)` (cash), set `Dane.FormaPlatnosci`, and for transfer write the seller snapshot `Dane.RachunkiBankowe.RachunekBankowyMojejFirmy {Nazwa, Numer}`. No `DodajPlatnosciDomyslne` on this path.
      - Keep step 6c..8 unchanged; extend the pre-save debug dump with `FormaPlatnosciId` (already listed) + the document bank-account id.
    - **Acceptance**: live: FV issued with `transfer`+account shows that account on the document (issue AC); FV with `cash` books an immediate payment; FV without fields identical to pre-change behavior.
 5. **Stretch: default-account writer (D7)**
    - **Files**: `bridge/Subiekt.Bridge.Infrastructure.Sfera/SferaRachunkiBankoweService.cs` (BO logic) + `bridge/Subiekt.Bridge.Infrastructure.Sfera/Adapters/SferaDefaultBankAccountWriter.cs` (port adapter, enqueues via `SferaWriteQueue`)
-   - **Action**: reflection path confirmed in Phase 0 probe 3: load target account BO, set `PodstawowyDlaWaluty = true`, save; clear the flag on the previous default of the same currency in the same queued unit of work.
+   - **Action**: Phase-0-CONFIRMED path (findings s.6): load the seller Podmiot BO via `IPodmioty.Znajdz(x => x.Id == ownerId)`, locate the target account in `Dane.Rachunki`, set `Dane.RachunekPodstawowy`, `Zapisz()` - the previous default clears automatically. (NOT `PodstawowyDlaWaluty`, and NOT a direct `WlascicielPodstawowego` write - unsponsored, throws.)
    - **Acceptance**: after the call, Subiekt's config screen shows the new default; second call is idempotent.
 
 ### Phase 5 - Api (contract + endpoints)

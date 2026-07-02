@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <PlatformTarget>x64</PlatformTarget>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <!-- Throwaway Phase 0 probe for issue #1 (bank account / payment method per
+         invoice). Standalone diagnostic tool, not part of bridge.sln - mirrors
+         SferaInspect's warnings policy. -->
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="InsERT.Moria.Sfera">
+      <HintPath>$(SferaBinaries)\InsERT.Moria.Sfera.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="InsERT.Moria.API">
+      <HintPath>$(SferaBinaries)\InsERT.Moria.API.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="5.1.5" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="8.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Options" Version="8.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\Subiekt.Bridge.Infrastructure.Sfera\Subiekt.Bridge.Infrastructure.Sfera.csproj" />
+  </ItemGroup>
+</Project>
