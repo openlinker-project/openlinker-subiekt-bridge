@@ -16,6 +16,12 @@ namespace Subiekt.Bridge.Infrastructure.Sql;
 /// accounts, so the filter is mandatory. An install may have MORE THAN ONE
 /// such Podmiot (multiple payers/branches) — issue #3 — so every matching
 /// Podmiot is enumerated, not just one.</item>
+/// <item><c>Podmioty</c> has NO <c>Nazwa</c> column — verified live against
+/// <c>Nexo_Demo_1</c> (issue #3/#5 Phase 1 probe, 2026-07-02): querying
+/// <c>owner.Nazwa</c> throws <c>Invalid column name 'Nazwa'</c> (128-column
+/// schema dump confirms the display-name column is <c>NazwaSkrocona</c>).
+/// This was an unverified assumption at PR #4 authoring time; caught by the
+/// first live run.</item>
 /// <item>The UI's "Podstawowy" flag is <c>WlascicielPodstawowego_Id IS NOT NULL</c>
 /// (back-reference from <c>Podmiot.RachunekPodstawowy</c>), NOT
 /// <c>PodstawowyDlaWaluty</c>.</item>
@@ -33,7 +39,7 @@ public sealed class SqlBankAccountsReader : IBankAccountsReader
                rb.JestRachunkiemVAT,
                CAST(CASE WHEN rb.WlascicielPodstawowego_Id IS NOT NULL THEN 1 ELSE 0 END AS bit) AS IsDefault,
                rb.Wlasciciel_Id AS OwnerPodmiotId,
-               owner.Nazwa AS OwnerName
+               owner.NazwaSkrocona AS OwnerName
         FROM ModelDanychContainer.CentraGromadzeniaFinansow_RachunekBankowy rb
         JOIN ModelDanychContainer.CentraGromadzeniaFinansow cgf ON cgf.Id = rb.Id
         LEFT JOIN ModelDanychContainer.Waluty w ON w.Id = rb.Waluta_Id
