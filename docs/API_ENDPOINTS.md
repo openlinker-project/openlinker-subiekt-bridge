@@ -448,7 +448,7 @@ Lists ACTIVE bank accounts from Subiekt's "Rachunki bankowe" configuration acros
 - `id` is the value to pass as `bankAccountId` on `POST /api/invoices` and to `PUT /api/bank-accounts/{id}/default`.
 
 ### `PUT /api/bank-accounts/{id}/default` — set the seller default account (issue #1)
-Makes `{id}` the seller's default ("Podstawowy") account. Runs as a Podmiot business-object save on the Sfera write queue; the previous default clears automatically. Idempotent — selecting the current default succeeds without a write. Unknown / inactive / non-seller accounts return the `rejected` envelope (HTTP 422).
+Makes `{id}` the default ("Podstawowy") account **of the Podmiot that owns it** — each seller Podmiot keeps its own default, so on a multi-payer install this does not set one global default (issue #3). Runs as a Podmiot business-object save on the Sfera write queue; the owning Podmiot's previous default clears automatically. Idempotent — selecting the current default succeeds without a write. Unknown / inactive / non-seller accounts return the `rejected` envelope (HTTP 422).
 
 ```json
 { "success": true, "data": { "bankAccountId": 100007, "isDefault": true } }
@@ -474,7 +474,8 @@ STRICT semantics (any other combination is rejected, HTTP 422 `validation`):
 | any | any (on `documentType: "PA"`) | 422 — not supported for paragony |
 
 - Vocabulary errors (`paymentMethod` outside `cash`/`transfer`, non-positive `bankAccountId`) are 400 `bad_request` (shape validation).
-- The account must exist, be ACTIVE, belong to the seller and match the document currency — otherwise 422 `rejected`.
+- The account must exist, be ACTIVE, belong to **a** seller (MojaFirma) Podmiot and match the document currency — otherwise 422 `rejected`.
+- **Multi-payer caveat (issue #3)**: on installs with more than one seller Podmiot the bridge does NOT yet validate that the account's owning Podmiot matches the Podmiot the document is issued under — the caller must ensure `bankAccountId` belongs to the intended payer (pick from `GET /api/bank-accounts` by `ownerPodmiotId`). The bridge logs a warning on every such issuance until the Oddział/Płatnik selector lands (open work on issue #3).
 - The cash/transfer → `FormaPlatnosci` mapping is configurable: `Sfera:CashPaymentFormName` (default `gotówka`) and `Sfera:TransferPaymentFormName` (default `przelew`), matched case-insensitively among active payment forms.
 
 ### `POST /api/customers/upsert` — address & dedup

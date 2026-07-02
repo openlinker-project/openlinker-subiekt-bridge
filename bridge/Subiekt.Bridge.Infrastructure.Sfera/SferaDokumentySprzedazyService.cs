@@ -304,7 +304,8 @@ public sealed class SferaDokumentySprzedazyService
                 ?? throw new ArgumentException("Płatność 'transfer' wymaga bankAccountId.");
             using var cmd = conn.CreateCommand();
             cmd.CommandText = @"
-                SELECT cgf.Nazwa, rb.Numer, w.Symbol, rb.Aktywny
+                SELECT cgf.Nazwa, rb.Numer, w.Symbol, rb.Aktywny, rb.Wlasciciel_Id,
+                       (SELECT COUNT(*) FROM ModelDanychContainer.Podmioty WHERE Typ = 2 AND Podtyp = 11) AS SellerCount
                 FROM ModelDanychContainer.CentraGromadzeniaFinansow_RachunekBankowy rb
                 JOIN ModelDanychContainer.CentraGromadzeniaFinansow cgf ON cgf.Id = rb.Id
                 LEFT JOIN ModelDanychContainer.Waluty w ON w.Id = rb.Waluta_Id
@@ -318,12 +319,28 @@ public sealed class SferaDokumentySprzedazyService
             accNumber = reader.IsDBNull(1) ? "" : reader.GetString(1);
             var accCurrency = reader.IsDBNull(2) ? null : reader.GetString(2);
             var active = reader.GetBoolean(3);
+            var ownerPodmiotId = reader.GetInt32(4);
+            var sellerPodmiotCount = reader.GetInt32(5);
             if (!active)
                 throw new ArgumentException($"Rachunek bankowy {accountId} jest nieaktywny.");
             if (accCurrency is not null
                 && !string.Equals(accCurrency, payment.Currency, StringComparison.OrdinalIgnoreCase))
                 throw new ArgumentException(
                     $"Rachunek bankowy {accountId} jest w walucie {accCurrency}, a dokument w {payment.Currency}.");
+
+            // Issue #3 interim guard: the pre-check above accepts an account owned by ANY
+            // seller Podmiot, but it CANNOT yet verify the owner matches the Podmiot this
+            // document is issued under - whether Dane.MojaFirmaId maps 1:1 onto a
+            // Podmioty row (vs. a separate MojaFirma entity) is exactly the pre-probe
+            // unknown that `BankAccountProbe podmioty` exists to answer, so a hard check
+            // would risk false rejections on every install. Until the Oddzial/Platnik
+            // selector lands (open work on issue #3), the CALLER must ensure
+            // bankAccountId belongs to the intended payer; on multi-payer installs we
+            // log loudly so a cross-payer stamp is auditable instead of silent.
+            if (sellerPodmiotCount > 1)
+                _log.LogWarning(
+                    "Multi-payer install ({count} seller Podmioty): bank account {accountId} owned by Podmiot {ownerId} accepted WITHOUT validating it matches the document's payer (issue #3) - caller must ensure the account belongs to the intended payer",
+                    sellerPodmiotCount, accountId, ownerPodmiotId);
         }
 
         // 2. Materialize the FormaPlatnosci entity in the document's unit of work.

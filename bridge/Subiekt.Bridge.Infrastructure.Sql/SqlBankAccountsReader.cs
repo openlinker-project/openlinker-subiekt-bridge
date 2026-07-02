@@ -37,9 +37,9 @@ public sealed class SqlBankAccountsReader : IBankAccountsReader
         FROM ModelDanychContainer.CentraGromadzeniaFinansow_RachunekBankowy rb
         JOIN ModelDanychContainer.CentraGromadzeniaFinansow cgf ON cgf.Id = rb.Id
         LEFT JOIN ModelDanychContainer.Waluty w ON w.Id = rb.Waluta_Id
-        LEFT JOIN ModelDanychContainer.Podmioty owner ON owner.Id = rb.Wlasciciel_Id
+        JOIN ModelDanychContainer.Podmioty owner ON owner.Id = rb.Wlasciciel_Id
         WHERE rb.Aktywny = 1
-          AND rb.Wlasciciel_Id IN (SELECT Id FROM ModelDanychContainer.Podmioty WHERE Typ = 2 AND Podtyp = 11)
+          AND owner.Typ = 2 AND owner.Podtyp = 11
         ORDER BY rb.Wlasciciel_Id, IsDefault DESC, rb.Id;";
 
     private readonly ISqlConnectionFactory _factory;
