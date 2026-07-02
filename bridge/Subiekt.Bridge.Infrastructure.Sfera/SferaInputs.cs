@@ -43,7 +43,7 @@ public sealed record SferaInvoiceInput(
     DateTime DataWydania,
     IReadOnlyList<SferaInvoiceLineInput> Lines,
     SferaPaymentInput? Payment = null,
-    SferaBranchInput? Branch = null);
+    int? StanowiskoKasoweId = null);
 
 /// <summary>
 /// Explicit payment selection for a sales document (issue #1). <see cref="Method"/>
@@ -52,15 +52,6 @@ public sealed record SferaInvoiceInput(
 /// currency used for the account-currency pre-check.
 /// </summary>
 public sealed record SferaPaymentInput(string Method, int? BankAccountId, string Currency);
-
-/// <summary>
-/// Explicit Oddzial/Stanowisko Kasowe selection for a sales document (issue #5).
-/// <see cref="OddzialId"/> is the Subiekt <c>JednostkaOrganizacyjna</c> id (null =
-/// document's implicit-default branch); <see cref="StanowiskoKasoweId"/> is the Subiekt
-/// <c>CentraGromadzeniaFinansow_StanowiskoKasowe</c> id (always set - the Domain
-/// <c>BranchSelection</c> rule rejects Oddzial-without-Stanowisko upstream).
-/// </summary>
-public sealed record SferaBranchInput(int? OddzialId, int StanowiskoKasoweId);
 
 /// <summary>Product upsert input, mirroring CreateTowarRequestDto.</summary>
 public sealed record SferaProductInput(

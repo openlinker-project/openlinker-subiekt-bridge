@@ -480,7 +480,7 @@ STRICT semantics (any other combination is rejected, HTTP 422 `validation`):
 - **Multi-payer caveat (issue #3)**: on installs with more than one seller Podmiot the bridge does NOT yet validate that the account's owning Podmiot matches the Podmiot the document is issued under — the caller must ensure `bankAccountId` belongs to the intended payer (pick from `GET /api/bank-accounts` by `ownerPodmiotId`). The bridge logs a warning on every such issuance until the Oddział/Płatnik selector lands (open work on issue #3).
 - The cash/transfer → `FormaPlatnosci` mapping is configurable: `Sfera:CashPaymentFormName` (default `gotówka`) and `Sfera:TransferPaymentFormName` (default `przelew`), matched case-insensitively among active payment forms.
 
-### `GET /api/branches` — seller branches (Oddziały) (issue #5)
+### `GET /api/branches` — seller branches (Oddziały), INFORMATIONAL ONLY (issue #5)
 Lists every Oddzial (`JednostkaOrganizacyjna`), independent of the seller Podmiot axis from issue #3 — a single-payer install can still have multiple branches. Read-only, served from the separate SQL connection.
 
 ```json
@@ -490,10 +490,10 @@ Lists every Oddzial (`JednostkaOrganizacyjna`), independent of the seller Podmio
 ] } }
 ```
 
-- `id` is the value to pass as `oddzialId` on `POST /api/invoices`. Note: the head-office unit (the document's implicit-default branch, `100000` in the demo data used below) is NOT one of the rows returned here — `GET /api/branches` only lists rows from `JednostkiOrganizacyjne_Oddzial`, not the head office itself.
+**This endpoint is informational only — its `id` is NOT accepted anywhere on `POST /api/invoices`.** Live investigation (`docs/spikes/podmioty-oddzial-stanowisko-probe-findings.md` §8) proved a Subiekt document's operative branch comes from the **logged-in session's business context** (`IKontekstBiznesowy` — read-only, fixed per authenticated user), never from a per-document field. Neither patching the document after creation nor supplying the branch via its creation parameters overrides it; both were tried live against a real Sfera connection and both failed identically. Routing an invoice to a non-default branch would require the bridge to authenticate as a different Subiekt user per branch — a session-architecture change, not a per-invoice API parameter — and is out of scope. This endpoint exists so an operator/OL admin can see which branches are configured.
 
 ### `GET /api/cash-registers` — cash-register stations (Stanowiska Kasowe) (issue #5)
-Lists every Stanowisko Kasowe. `oddzialId` is the branch it is explicitly restricted to (via `StanowiskoKasoweJednostkaOrganizacyjna`) — `null` means unlinked. Optional `?oddzialId=` filters to the stations returned as-is by the reader (client-side filter today; use it to find candidates for a given branch, but see the caveat below before relying on an unlinked result for a non-default branch).
+Lists every Stanowisko Kasowe. `id` is the value to pass as `stanowiskoKasoweId` on `POST /api/invoices` (the only functional selector this issue ships). `oddzialId` on each row (and the optional `?oddzialId=` filter) is informational only, per the note above — it does not gate which stations are usable.
 
 ```json
 { "success": true, "data": { "count": 4, "cashRegisters": [
@@ -502,28 +502,17 @@ Lists every Stanowisko Kasowe. `oddzialId` is the branch it is explicitly restri
 ] } }
 ```
 
-- **Live-verified rule** (`docs/spikes/podmioty-oddzial-stanowisko-probe-findings.md` §6-7): an unlinked station (`oddzialId: null`) is reserved for the document's IMPLICIT-DEFAULT branch — it is NOT usable from an explicitly-selected non-default `oddzialId`. When picking `stanowiskoKasoweId` together with an explicit `oddzialId` on `POST /api/invoices`, the station's `oddzialId` here must match exactly, or the invoice call is rejected (422).
-
-### Branch/cash-register selection on `POST /api/invoices` (issue #5)
-Two ADDITIVE, optional fields select the branch and cash-register station explicitly; both absent keeps today's implicit-default behavior (no regression):
+### Cash-register selection on `POST /api/invoices` (issue #5)
+One ADDITIVE, optional field selects the cash-register station explicitly; absent keeps today's implicit-default behavior (no regression):
 
 ```json
-{ "oddzialId": 100000, "stanowiskoKasoweId": 100065 }
+{ "stanowiskoKasoweId": 100066 }
 ```
 
-STRICT semantics (any other combination is rejected):
-
-| oddzialId | stanowiskoKasoweId | result |
-|---|---|---|
-| absent | absent | implicit-default branch/station (today's behavior) |
-| absent | present | station selected explicitly, document's branch stays at its implicit default |
-| present | present | branch + station selected; the station MUST be linked to this exact `oddzialId` (see `GET /api/cash-registers`) |
-| present | absent | 422 — `oddzialId` requires an explicit `stanowiskoKasoweId` |
-| any | any (on `documentType: "PA"`) | 422 — not supported for paragony |
-
-- Vocabulary errors (non-positive ids) are 400 `bad_request` (shape validation).
-- **Why `oddzialId` alone is rejected, not silently defaulted**: live black-box testing showed Sfera's implicit default cash-register resolution (fired when adding a cash/immediate payment) does not scope to a non-default branch — issuing under an explicit `oddzialId` with no explicit station fails deep inside Sfera with no actionable message. Requiring both together avoids ever hitting that failure mode.
-- **Why a mismatched pair is rejected upfront, not auto-confirmed**: Subiekt's own desktop client treats a cross-branch station as a *confirmable warning* ("Stanowisko kasowe nie pochodzi z oddziału ustawionego na dokumencie" / "ZAPISZ MIMO TO"), not a hard block — but a headless API caller has no dialog to click through. The bridge deliberately mirrors the same rule via its own pre-check (before ever calling Sfera) and rejects the request (422), rather than silently ignoring the warning. The specific mismatch reason (which branch the chosen station is actually linked to) is written to the server log; the caller receives the generic `rejected` reason (same as every other write-path rejection), so avoid the rejection proactively by picking a station whose `oddzialId` matches from `GET /api/cash-registers`. Operator decision, 2026-07-02: never auto-accept an unconfirmed mismatch.
+- Absent → the document's implicit-default station applies (today's behavior).
+- Present → must be a positive id (400 `bad_request` otherwise); the document is issued using that station, with its branch left at the session's implicit default (see the `GET /api/branches` note above — branch cannot be selected).
+- Not supported for `documentType: "PA"` (422).
+- Live-verified end-to-end against a real Sfera connection (station-only selection saves successfully); see `docs/plans/implementation-plan-5-oddzial-stanowisko-selector.md` for the full investigation that led to this scope.
 
 ### `POST /api/customers/upsert` — address & dedup
 - Dedup by `nip`: a repeat upsert of an existing NIP returns the existing `id` (keep-existing policy; no overwrite — logged).

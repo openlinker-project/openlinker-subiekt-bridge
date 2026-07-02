@@ -80,14 +80,14 @@ public static class InvoiceContractMapper
         if (paymentResult.IsFailure)
             return Result.Failure<(SalesDocument, InlineBuyer?)>(paymentResult.Error);
 
-        // Issue #5: explicit Oddzial/Stanowisko Kasowe selection — same split as payment:
-        // combination rules in the Domain value object, cross-consistency (station must be
-        // linked to the given Oddzial) checked at issuance time in Infrastructure.Sfera.
-        var branchResult = BranchSelection.TryCreate(req.OddzialId, req.StanowiskoKasoweId);
-        if (branchResult.IsFailure)
-            return Result.Failure<(SalesDocument, InlineBuyer?)>(branchResult.Error);
+        // Issue #5: explicit Stanowisko Kasowe selection. No Oddzial selection - see
+        // CashRegisterSelection's doc-comment for why per-invoice branch routing isn't
+        // achievable at all.
+        var cashRegisterResult = CashRegisterSelection.TryCreate(req.StanowiskoKasoweId);
+        if (cashRegisterResult.IsFailure)
+            return Result.Failure<(SalesDocument, InlineBuyer?)>(cashRegisterResult.Error);
 
-        var docResult = SalesDocument.Create(documentType, buyerId, currency, issueDate, lines, paymentResult.Value, branchResult.Value);
+        var docResult = SalesDocument.Create(documentType, buyerId, currency, issueDate, lines, paymentResult.Value, cashRegisterResult.Value);
         if (docResult.IsFailure)
             return Result.Failure<(SalesDocument, InlineBuyer?)>(docResult.Error);
 

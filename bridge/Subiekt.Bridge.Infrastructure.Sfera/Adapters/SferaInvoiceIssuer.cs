@@ -86,10 +86,8 @@ public sealed class SferaInvoiceIssuer : IInvoiceIssuer
                 Currency: document.Currency)
             : null;
 
-        // Explicit Oddzial/Stanowisko selection (issue #5) rides along the same way.
-        var branch = document.Branch is { } b
-            ? new SferaBranchInput(OddzialId: b.OddzialId, StanowiskoKasoweId: b.StanowiskoKasoweId)
-            : null;
+        // Explicit Stanowisko Kasowe selection (issue #5) rides along the same way.
+        var stanowiskoKasoweId = document.CashRegister?.StanowiskoKasoweId;
 
         return new SferaInvoiceInput(
             KontrahentId: document.BuyerId,
@@ -97,6 +95,6 @@ public sealed class SferaInvoiceIssuer : IInvoiceIssuer
             DataWydania: fiscal.DataWydania.LocalDateTime,
             Lines: lines,
             Payment: payment,
-            Branch: branch);
+            StanowiskoKasoweId: stanowiskoKasoweId);
     }
 }

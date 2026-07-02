@@ -121,13 +121,8 @@ public sealed class CreateInvoiceRequestValidator : AbstractValidator<CreateInvo
             .Must(id => !id.HasValue || id.Value > 0)
             .WithMessage("BankAccountId musi być dodatnie.");
 
-        // Issue #5 branch fields: SHAPE only (positivity). The strict combination rule
-        // (OddzialId requires StanowiskoKasoweId; cross-consistency check) is the Domain
-        // BranchSelection rule and surfaces as 422 via the build-failure path.
-        RuleFor(x => x.OddzialId)
-            .Must(id => !id.HasValue || id.Value > 0)
-            .WithMessage("OddzialId musi być dodatnie.");
-
+        // Issue #5 cash-register field: SHAPE only (positivity). The Domain
+        // CashRegisterSelection rule surfaces as 422 via the build-failure path.
         RuleFor(x => x.StanowiskoKasoweId)
             .Must(id => !id.HasValue || id.Value > 0)
             .WithMessage("StanowiskoKasoweId musi być dodatnie.");

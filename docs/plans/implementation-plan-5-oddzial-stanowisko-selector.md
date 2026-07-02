@@ -1,10 +1,23 @@
 # Implementation Plan: Oddział/Stanowisko Kasowe selector + discovery endpoints
 
-**Date**: 2026-07-02
-**Status**: Implemented, self-reviewed, live-verified
+**Date**: 2026-07-02 (rescoped 2026-07-03)
+**Status**: Implemented, self-reviewed, live-verified — **RESCOPED to Stanowisko-only**
 **Issue**: openlinker-project/openlinker-subiekt-bridge#5
 **Branch**: `5-oddzial-stanowisko-selector`
 **Estimated Effort**: 1 day (including live verification via WSL→Windows, no separate handoff session needed)
+
+---
+
+## 0. SCOPE REVISION (2026-07-03) — branch (Oddzial) selection removed, not achievable
+
+A second independent tech-review pass caught that this plan's §6 "live verification" never actually proved a non-default branch works — the one ACCEPTED run that set an Oddzial used `100000`, which is the document's own implicit-default (head-office) unit, not a real branch. Two further live experiments (documented in `docs/spikes/podmioty-oddzial-stanowisko-probe-findings.md` §8) settled it definitively:
+
+1. Creating the document via `ParametryTworzeniaDokumentu` (Magazyn+Oddzial+Stanowisko bundled at creation time, discovered in the reflection dump as a plausible "correct" mechanism) with a real branch (`100001`) — still rejected, identically to the post-creation patch this plan originally used.
+2. `IKontekstBiznesowy` — the session's business context (Oddzial/Magazyn/StanowiskoKasowe/Podmiot/RachunekBankowy), resolved live, is **entirely read-only** and matches exactly the implicit-default values observed everywhere in this investigation. A document's operative branch comes from the **logged-in session**, not any per-document field.
+
+**Conclusion**: routing an invoice to a non-default branch would require the bridge to authenticate as a different Subiekt user per branch (a session-architecture change), not a per-invoice API parameter. This is out of scope for issue #5 as originally framed.
+
+**Rescoped**: `oddzialId` removed entirely from the write contract. `stanowiskoKasoweId` (live-verified working with the implicit-default branch) ships as the only functional selector. `GET /api/branches` stays as an informational-only listing. `BranchSelection` (Domain) renamed to `CashRegisterSelection` and simplified to one field. The rest of this document (sections 1-6) describes the ORIGINAL, broader scope and is kept for historical record of the investigation — read section 0 as the authoritative current state.
 
 ---
 

@@ -157,20 +157,19 @@ public sealed class SferaDokumentySprzedazyService
         // 6. Recompute netto/VAT split from the manual gross prices.
         _acc.InvokeIfExists(bo, boType, "Przelicz");
 
-        // 6a. Explicit Oddzial/Stanowisko Kasowe selection (issue #5) - runs after the
-        //     netto/VAT recompute (step 6) but BEFORE the payment step (6b), since Sfera's
-        //     implicit-default cash-register resolution
-        //     (fired by DodajPlatnoscNatychmiastowa) reads the document's CURRENT branch.
-        //     Cross-consistency is verified by SQL BEFORE touching the BO at all -
-        //     mirroring Sfera's own StanowiskoKasoweZInnejJednostkiOrganizacyjnejBlad rule
-        //     at the bridge layer instead of relying on its confirm-to-proceed warning
-        //     dialog (a headless caller has no way to click "Zapisz mimo to" - see
-        //     docs/spikes/podmioty-oddzial-stanowisko-probe-findings.md s.6-7). Operator
-        //     decision (2026-07-02): NEVER auto-accept an unconfirmed mismatch - reject
-        //     upfront with a clear message instead.
-        if (dto.Branch is { } branch)
+        // 6a. Explicit Stanowisko Kasowe selection (issue #5) - runs after the netto/VAT
+        //     recompute (step 6) but BEFORE the payment step (6b), since Sfera's
+        //     implicit-default cash-register resolution (fired by
+        //     DodajPlatnoscNatychmiastowa) reads the document's CURRENT station. Does NOT
+        //     select a branch (Oddzial) - live investigation
+        //     (docs/spikes/podmioty-oddzial-stanowisko-probe-findings.md s.8) proved a
+        //     document's operative Oddzial is fixed by the logged-in session's
+        //     IKontekstBiznesowy (read-only, session-bound), never a per-document field;
+        //     that scope was dropped after both patch-after-creation and
+        //     ParametryTworzeniaDokumentu-at-creation were tried live and failed identically.
+        if (dto.StanowiskoKasoweId is int stanowiskoKasoweId)
         {
-            ApplyExplicitBranch(conn, dane, daneType, branch);
+            ApplyExplicitCashRegister(dane, daneType, stanowiskoKasoweId);
         }
 
         // 6b. Payments. An EXPLICIT selection (issue #1) replaces the config-driven
@@ -279,62 +278,22 @@ public sealed class SferaDokumentySprzedazyService
         return (id, numer);
     }
 
-    // Apply an EXPLICIT Oddzial/Stanowisko Kasowe selection (issue #5). Verified live
-    // mechanism (docs/spikes/podmioty-oddzial-stanowisko-probe-findings.md s.6-7): set
-    // the paired "<Nav>Id" FK property and let EF fixup materialize the nav inside THIS
+    // Apply an EXPLICIT Stanowisko Kasowe selection (issue #5). Verified live mechanism
+    // (docs/spikes/podmioty-oddzial-stanowisko-probe-findings.md s.6): set the paired
+    // "StanowiskoKasoweId" FK property and let EF fixup materialize the nav inside THIS
     // document's own unit of work - the same pattern already proven for FormaPlatnosciId
-    // below. Cross-consistency rule (evidence-based, from live black-box isolation
-    // testing - NOT from official Sfera docs):
-    //   - StanowiskoKasoweId is ALWAYS set (the Domain BranchSelection rule guarantees
-    //     it's non-null whenever Branch is present at all).
-    //   - When OddzialId is null: MiejsceWprowadzenia is left untouched (today's implicit
-    //     default) - live-verified to work with ANY Stanowisko choice, no cross-check
-    //     needed since the document's branch never changes.
-    //   - When OddzialId is set: MiejsceWprowadzeniaId is set to it, AND the chosen
-    //     Stanowisko MUST have an explicit StanowiskoKasoweJednostkaOrganizacyjna link row
-    //     to that EXACT Oddzial - an unlinked station or one linked to a different Oddzial
-    //     is REJECTED here, before ever calling Zapisz(). This mirrors (does not silently
-    //     bypass) Sfera's own StanowiskoKasoweZInnejJednostkiOrganizacyjnejBlad warning,
-    //     which in the desktop client is a confirmable "Zapisz mimo to" dialog a headless
-    //     caller cannot click through - so the bridge front-loads the same check and
-    //     fails the request with an actionable message instead.
-    private void ApplyExplicitBranch(
-        Microsoft.Data.SqlClient.SqlConnection conn,
-        object dane, Type daneType,
-        SferaBranchInput branch)
+    // below. Does NOT touch the document's branch (Oddzial) - see s.8 for why that's not
+    // achievable per-document at all (the operative Oddzial comes from the logged-in
+    // session's read-only IKontekstBiznesowy, not a per-document field), so no
+    // cross-consistency check against an Oddzial is needed or possible here.
+    private void ApplyExplicitCashRegister(object dane, Type daneType, int stanowiskoKasoweId)
     {
-        if (branch.OddzialId is int oddzialId)
-        {
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText = @"
-                SELECT link.JednostkiOrganizacyjne_Id
-                FROM ModelDanychContainer.StanowiskoKasoweJednostkaOrganizacyjna link
-                WHERE link.StanowiskaKasowe_Id = @stanowiskoId";
-            cmd.Parameters.AddWithValue("@stanowiskoId", branch.StanowiskoKasoweId);
-            var linkedOddzial = cmd.ExecuteScalar();
-
-            if (linkedOddzial is null)
-                throw new ArgumentException(
-                    $"Stanowisko kasowe {branch.StanowiskoKasoweId} nie jest przypisane do żadnego oddziału - " +
-                    $"nie może być użyte z jawnie wskazanym oddziałem {oddzialId} (wymagane jawne powiązanie).");
-            if ((int)linkedOddzial != oddzialId)
-                throw new ArgumentException(
-                    $"Stanowisko kasowe {branch.StanowiskoKasoweId} nie pochodzi z oddziału {oddzialId} " +
-                    $"(jest przypisane do oddziału {linkedOddzial}).");
-
-            _acc.SetProperty(dane, daneType, "MiejsceWprowadzeniaId", oddzialId);
-            var resolvedOddzial = _acc.GetProperty(dane, daneType, "MiejsceWprowadzenia");
-            if (resolvedOddzial is null)
-                throw new InvalidOperationException($"Nie udało się rozwiązać oddziału {oddzialId} w kontekście dokumentu.");
-        }
-
-        _acc.SetProperty(dane, daneType, "StanowiskoKasoweId", branch.StanowiskoKasoweId);
+        _acc.SetProperty(dane, daneType, "StanowiskoKasoweId", stanowiskoKasoweId);
         var resolvedStanowisko = _acc.GetProperty(dane, daneType, "StanowiskoKasowe");
         if (resolvedStanowisko is null)
-            throw new InvalidOperationException($"Nie udało się rozwiązać stanowiska kasowego {branch.StanowiskoKasoweId} w kontekście dokumentu.");
+            throw new InvalidOperationException($"Nie udało się rozwiązać stanowiska kasowego {stanowiskoKasoweId} w kontekście dokumentu.");
 
-        _log.LogInformation("Explicit branch applied: oddzial={oddzial}, stanowisko={stanowisko}",
-            branch.OddzialId?.ToString() ?? "(default)", branch.StanowiskoKasoweId);
+        _log.LogInformation("Explicit cash-register applied: stanowisko={stanowisko}", stanowiskoKasoweId);
     }
 
     // Apply an EXPLICIT payment selection (issue #1). Verified live mechanism

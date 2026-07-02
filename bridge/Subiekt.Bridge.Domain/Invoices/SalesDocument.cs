@@ -27,7 +27,7 @@ public sealed class SalesDocument
         DateTimeOffset issueDate,
         IReadOnlyList<InvoiceLine> lines,
         PaymentSelection? payment,
-        BranchSelection? branch)
+        CashRegisterSelection? cashRegister)
     {
         DocumentType = documentType;
         BuyerId = buyerId;
@@ -35,7 +35,7 @@ public sealed class SalesDocument
         IssueDate = issueDate;
         _lines = lines.ToList();
         Payment = payment;
-        Branch = branch;
+        CashRegister = cashRegister;
     }
 
     public DocumentType DocumentType { get; }
@@ -56,10 +56,12 @@ public sealed class SalesDocument
     public PaymentSelection? Payment { get; }
 
     /// <summary>
-    /// Explicit Oddzial/Stanowisko Kasowe selection (issue #5). Null means "no
-    /// selection" — the document's implicit-default branch/cash-register apply.
+    /// Explicit Stanowisko Kasowe selection (issue #5). Null means "no selection" -
+    /// the document's implicit-default cash-register applies. Does NOT select a branch
+    /// (Oddzial) - see <see cref="CashRegisterSelection"/>'s doc-comment for why that's
+    /// not achievable per-document.
     /// </summary>
-    public BranchSelection? Branch { get; }
+    public CashRegisterSelection? CashRegister { get; }
 
     public static Result<SalesDocument> Create(
         DocumentType documentType,
@@ -68,7 +70,7 @@ public sealed class SalesDocument
         DateTimeOffset issueDate,
         IReadOnlyList<InvoiceLine> lines,
         PaymentSelection? payment = null,
-        BranchSelection? branch = null)
+        CashRegisterSelection? cashRegister = null)
     {
         if (buyerId <= 0)
             return Result.Failure<SalesDocument>(new Error("doc.buyer", "A valid buyer id is required."));
@@ -83,18 +85,18 @@ public sealed class SalesDocument
             return Result.Failure<SalesDocument>(
                 new Error("doc.payment.pa", "An explicit payment selection is not supported for a paragon (PA)."));
 
-        // Same rationale as the payment guard: a paragon's implicit branch/station
-        // path would silently ignore an explicit Oddzial/Stanowisko selection.
-        if (branch is not null && documentType == DocumentType.PA)
+        // Same rationale as the payment guard: a paragon's implicit station path would
+        // silently ignore an explicit Stanowisko selection.
+        if (cashRegister is not null && documentType == DocumentType.PA)
             return Result.Failure<SalesDocument>(
-                new Error("doc.branch.pa", "An explicit branch/station selection is not supported for a paragon (PA)."));
+                new Error("doc.cashRegister.pa", "An explicit cash-register selection is not supported for a paragon (PA)."));
 
         var normalizedCurrency = currency.Trim().ToUpperInvariant();
         if (lines.Any(l => !string.Equals(l.UnitGrossPrice.Currency, normalizedCurrency, StringComparison.Ordinal)))
             return Result.Failure<SalesDocument>(
                 new Error("doc.currency.mismatch", "All line prices must use the document currency."));
 
-        return Result.Success(new SalesDocument(documentType, buyerId, normalizedCurrency, issueDate, lines, payment, branch));
+        return Result.Success(new SalesDocument(documentType, buyerId, normalizedCurrency, issueDate, lines, payment, cashRegister));
     }
 
     /// <summary>
@@ -173,7 +175,7 @@ public sealed class SalesDocument
             folded.Add(line.WithUnitGrossPrice(effPrice));
         }
 
-        return new SalesDocument(DocumentType, BuyerId, Currency, IssueDate, folded, Payment, Branch);
+        return new SalesDocument(DocumentType, BuyerId, Currency, IssueDate, folded, Payment, CashRegister);
     }
 
     /// <summary>

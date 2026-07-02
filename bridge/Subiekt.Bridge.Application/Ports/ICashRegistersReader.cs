@@ -3,12 +3,13 @@ using Subiekt.Bridge.Domain.Common;
 namespace Subiekt.Bridge.Application.Ports;
 
 /// <summary>
-/// A cash-register station (Stanowisko Kasowe) row (issue #5). <see cref="OddzialId"/> is
-/// the branch it is explicitly restricted to via <c>StanowiskoKasoweJednostkaOrganizacyjna</c>
-/// - null means unlinked. Live probing (docs/spikes/podmioty-oddzial-stanowisko-probe-findings.md
-/// s.6-7) confirmed an unlinked station is reserved for the document's IMPLICIT-DEFAULT branch,
-/// not usable from any explicit Oddzial - so a caller picking a non-default <c>oddzialId</c>
-/// must choose a station with a matching <see cref="OddzialId"/>.
+/// A cash-register station (Stanowisko Kasowe) row (issue #5). <c>Id</c> is the value to
+/// pass as <c>stanowiskoKasoweId</c> on <c>POST /api/invoices</c>. <see cref="OddzialId"/>
+/// is the branch it happens to be linked to via <c>StanowiskoKasoweJednostkaOrganizacyjna</c>
+/// (null = unlinked) - INFORMATIONAL ONLY. Per-invoice branch (Oddzial) selection is not
+/// supported at all (docs/spikes/podmioty-oddzial-stanowisko-probe-findings.md s.8: a
+/// document's Oddzial comes from the session's read-only business context, not a
+/// per-document field), so this link does not gate which stations are usable.
 /// </summary>
 public sealed record CashRegisterView(int Id, string? Nazwa, string? Symbol, int? OddzialId);
 
