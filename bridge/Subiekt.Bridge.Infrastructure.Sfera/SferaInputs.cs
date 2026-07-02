@@ -41,7 +41,16 @@ public sealed record SferaInvoiceInput(
     int KontrahentId,
     DateTime DataSprzedazy,
     DateTime DataWydania,
-    IReadOnlyList<SferaInvoiceLineInput> Lines);
+    IReadOnlyList<SferaInvoiceLineInput> Lines,
+    SferaPaymentInput? Payment = null);
+
+/// <summary>
+/// Explicit payment selection for a sales document (issue #1). <see cref="Method"/>
+/// is the neutral "cash" | "transfer"; <see cref="BankAccountId"/> is the Subiekt
+/// RachunekBankowy id (transfer only); <see cref="Currency"/> is the document
+/// currency used for the account-currency pre-check.
+/// </summary>
+public sealed record SferaPaymentInput(string Method, int? BankAccountId, string Currency);
 
 /// <summary>Product upsert input, mirroring CreateTowarRequestDto.</summary>
 public sealed record SferaProductInput(

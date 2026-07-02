@@ -57,6 +57,7 @@ builder.Services.AddSingleton<SferaDokumentySprzedazyService>();
 builder.Services.AddSingleton<SferaAsortymentyService>();
 builder.Services.AddSingleton<SferaKorektyService>();
 builder.Services.AddSingleton<SferaPrzyjeciaService>();
+builder.Services.AddSingleton<SferaRachunkiBankoweService>();
 
 // Domain clock (fiscal dates / receipt entry date). One implementation process-wide.
 builder.Services.AddSingleton<Subiekt.Bridge.Domain.Common.IClock, SystemClock>();
@@ -68,6 +69,7 @@ builder.Services.AddSingleton<ICorrectionIssuer, SferaCorrectionIssuer>();
 builder.Services.AddSingleton<IProductCatalog, SferaProductCatalog>();
 builder.Services.AddSingleton<IWarehouseReceiver, SferaWarehouseReceiver>();  // honest 501 stub
 builder.Services.AddSingleton<IIssueInvoiceWithBuyer, SferaIssueInvoiceWithBuyer>();
+builder.Services.AddSingleton<IDefaultBankAccountWriter, SferaDefaultBankAccountWriter>();
 builder.Services.AddSingleton<SferaPdfPrintoutService>();
 builder.Services.AddSingleton<IInvoicePdfRenderer, SferaInvoicePdfRenderer>();
 
@@ -94,6 +96,7 @@ builder.Services.AddSingleton<ISqlConnectionFactory, SqlConnectionFactory>();
 builder.Services.AddSingleton<ICustomerQuery, SqlCustomerQuery>();
 builder.Services.AddSingleton<IProductCatalogReader, SqlProductCatalogReader>();
 builder.Services.AddSingleton<IStockReader, SqlStockReader>();
+builder.Services.AddSingleton<IBankAccountsReader, SqlBankAccountsReader>();
 builder.Services.AddSingleton<IDocumentStatusReader, SqlDocumentStatusReader>();
 
 // Idempotency (atomic file store) + audit (SQLite).
@@ -369,6 +372,7 @@ app.MapCustomersEndpoints();
 app.MapProductsEndpoints();
 app.MapStockEndpoints();
 app.MapInvoicesEndpoints();
+app.MapBankAccountsEndpoints();
 app.MapAuditEndpoints();
 
 // Diagnostics introspection endpoints register ONLY when Diagnostics:Enabled AND

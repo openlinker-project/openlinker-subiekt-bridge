@@ -25,13 +25,15 @@ public sealed class SalesDocument
         int buyerId,
         string currency,
         DateTimeOffset issueDate,
-        IReadOnlyList<InvoiceLine> lines)
+        IReadOnlyList<InvoiceLine> lines,
+        PaymentSelection? payment)
     {
         DocumentType = documentType;
         BuyerId = buyerId;
         Currency = currency;
         IssueDate = issueDate;
         _lines = lines.ToList();
+        Payment = payment;
     }
 
     public DocumentType DocumentType { get; }
@@ -45,12 +47,19 @@ public sealed class SalesDocument
 
     public IReadOnlyList<InvoiceLine> Lines => _lines;
 
+    /// <summary>
+    /// Explicit payment selection (issue #1). Null means "no selection" — the
+    /// provider's default payment behavior applies unchanged.
+    /// </summary>
+    public PaymentSelection? Payment { get; }
+
     public static Result<SalesDocument> Create(
         DocumentType documentType,
         int buyerId,
         string currency,
         DateTimeOffset issueDate,
-        IReadOnlyList<InvoiceLine> lines)
+        IReadOnlyList<InvoiceLine> lines,
+        PaymentSelection? payment = null)
     {
         if (buyerId <= 0)
             return Result.Failure<SalesDocument>(new Error("doc.buyer", "A valid buyer id is required."));
@@ -59,12 +68,18 @@ public sealed class SalesDocument
         if (lines is null || lines.Count == 0)
             return Result.Failure<SalesDocument>(new Error("doc.lines", "At least one line is required."));
 
+        // A paragon keeps the provider's immediate-payment default path; an explicit
+        // selection on PA would be silently ignored downstream, so reject it loudly.
+        if (payment is not null && documentType == DocumentType.PA)
+            return Result.Failure<SalesDocument>(
+                new Error("doc.payment.pa", "An explicit payment selection is not supported for a paragon (PA)."));
+
         var normalizedCurrency = currency.Trim().ToUpperInvariant();
         if (lines.Any(l => !string.Equals(l.UnitGrossPrice.Currency, normalizedCurrency, StringComparison.Ordinal)))
             return Result.Failure<SalesDocument>(
                 new Error("doc.currency.mismatch", "All line prices must use the document currency."));
 
-        return Result.Success(new SalesDocument(documentType, buyerId, normalizedCurrency, issueDate, lines));
+        return Result.Success(new SalesDocument(documentType, buyerId, normalizedCurrency, issueDate, lines, payment));
     }
 
     /// <summary>
@@ -143,7 +158,7 @@ public sealed class SalesDocument
             folded.Add(line.WithUnitGrossPrice(effPrice));
         }
 
-        return new SalesDocument(DocumentType, BuyerId, Currency, IssueDate, folded);
+        return new SalesDocument(DocumentType, BuyerId, Currency, IssueDate, folded, Payment);
     }
 
     /// <summary>

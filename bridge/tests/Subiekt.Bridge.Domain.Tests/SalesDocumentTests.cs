@@ -18,6 +18,58 @@ public class SalesDocumentTests
     private static SalesDocument Doc(params InvoiceLine[] lines)
         => SalesDocument.Create(DocumentType.FV, buyerId: 1, Pln, DateTimeOffset.Now, lines).Value;
 
+    // --- issue #1: explicit payment selection on the aggregate ---
+
+    [Fact]
+    public void Create_WithoutPayment_HasNullPayment()
+    {
+        var doc = Doc(Line("A", 1, 10m));
+
+        Assert.Null(doc.Payment);
+    }
+
+    [Fact]
+    public void Create_FvWithTransferPayment_CarriesSelection()
+    {
+        var payment = PaymentSelection.TryCreate("transfer", 100007).Value;
+
+        var result = SalesDocument.Create(
+            DocumentType.FV, buyerId: 1, Pln, DateTimeOffset.Now,
+            new[] { Line("A", 1, 10m) }, payment);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(PaymentMethod.Transfer, result.Value.Payment!.Method);
+        Assert.Equal(100007, result.Value.Payment.BankAccountId);
+    }
+
+    [Fact]
+    public void Create_PaWithPayment_IsRejected()
+    {
+        var payment = PaymentSelection.TryCreate("cash", null).Value;
+
+        var result = SalesDocument.Create(
+            DocumentType.PA, buyerId: 1, Pln, DateTimeOffset.Now,
+            new[] { Line("A", 1, 10m) }, payment);
+
+        Assert.True(result.IsFailure);
+        Assert.Equal("doc.payment.pa", result.Error.Code);
+    }
+
+    [Fact]
+    public void FoldDiscounts_PreservesPaymentSelection()
+    {
+        var payment = PaymentSelection.TryCreate("transfer", 100007).Value;
+        var doc = SalesDocument.Create(
+            DocumentType.FV, buyerId: 1, Pln, DateTimeOffset.Now,
+            new[] { Line("A", 2, 100m), Line("DISC", 1, -30m) }, payment).Value;
+
+        var folded = doc.FoldDiscounts();
+
+        Assert.NotNull(folded.Payment);
+        Assert.Equal(PaymentMethod.Transfer, folded.Payment!.Method);
+        Assert.Equal(100007, folded.Payment.BankAccountId);
+    }
+
     [Fact]
     public void FoldDiscounts_WorkedExample_FoldsProportionallyAndDropsDiscountLine()
     {

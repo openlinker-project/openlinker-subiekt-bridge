@@ -23,4 +23,10 @@ public class SferaOptions
     // Connect to Sfera automatically on startup (background, best-effort).
     // The OL business contract assumes the bridge is already connected.
     public bool AutoConnect { get; set; } = true;
+
+    // Issue #1: FormaPlatnosci names used when the caller EXPLICITLY selects a
+    // payment method (cash/transfer). Looked up case-insensitively among active
+    // payment forms; configurable because the rows are operator-editable.
+    public string CashPaymentFormName { get; set; } = "gotówka";
+    public string TransferPaymentFormName { get; set; } = "przelew";
 }

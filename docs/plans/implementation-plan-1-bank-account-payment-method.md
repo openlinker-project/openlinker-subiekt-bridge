@@ -220,7 +220,9 @@ Dead end (verified): `AktualizujRachunkiBankowe(string[], out string)` updates t
    - `SferaInvoiceIssuer.ToInput` mapping cases (extend existing adapter/mapper tests if present in `Application.Tests`).
 2. **Docs**
    - `docs/API_ENDPOINTS.md`: document `GET /api/bank-accounts`, the new invoice fields, strict-validation semantics, and (stretch) the default endpoint.
-3. **Live verification checklist (issue AC)**
+3. **Handoff summary for the OpenLinker-side agent**
+   - After the PR is opened, produce a paste-able summary (English) of everything this PR adds - new endpoints with request/response shapes, the invoice-create contract extension (`paymentMethod` + `bankAccountId`, strict semantics), error codes, and the PR link - so the OpenLinker-repo agent can create the corresponding OL-side issue (Subiekt plugin: bank-accounts passthrough + per-invoice payment fields, mirroring the inFakt feature #1303/#1308) and link this PR from it.
+4. **Live verification checklist (issue AC)**
    - Scripted curl sequence (list accounts -> issue FV transfer+account -> read status -> inspect document in Subiekt UI/SQL -> issue FV without fields -> confirm unchanged defaults -> cash FV -> stretch default flip).
    - Findings written back to issue #1 before the PR leaves draft (explicit AC in the issue).
 

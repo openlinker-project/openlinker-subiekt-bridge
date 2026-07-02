@@ -220,7 +220,7 @@ void ServiceBaseline()
     // Proven production path: SferaDokumentySprzedazyService.UtworzFaktura.
     var (kontrahentId, symbol) = ResolveFixtures();
     log.LogInformation("Fixtures: kontrahent={k}, symbol={s}", kontrahentId, symbol);
-    var svc = new SferaDokumentySprzedazyService(loggerFactory.CreateLogger<SferaDokumentySprzedazyService>());
+    var svc = new SferaDokumentySprzedazyService(loggerFactory.CreateLogger<SferaDokumentySprzedazyService>(), Options.Create(opt));
     var input = new SferaInvoiceInput(
         KontrahentId: kontrahentId,
         DataSprzedazy: DateTime.Now,
