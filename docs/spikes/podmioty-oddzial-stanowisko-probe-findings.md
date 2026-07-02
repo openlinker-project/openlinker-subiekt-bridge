@@ -121,3 +121,20 @@ Ran with explicit user sign-off to issue throwaway Cash FVs on the demo DB. **Fi
 - **Practical implication for issue #5**: whatever gates `MiejsceWprowadzenia` changes is a bigger unknown than originally scoped, and blocks any FV from being issued under a non-default Oddział at all via this reflection path — this is more fundamental than the narrower Stanowisko-Kasowe question the issue was framed around. This needs either a UI-driven trace or Sfera support/docs, not more blind reflection probing, before committing further engineering time.
 
 Throwaway FVs created and left in place on the demo DB during this probe: ids 102367 (baseline cash), 102369 (Stanowisko-only, accepted). The rejected attempts created no document (Zapisz returned false, nothing persisted).
+
+## 7. UI trace confirms the mechanism (2026-07-02, operator's own manual test)
+
+The operator manually reproduced the same scenario through the actual Subiekt desktop client (Oddział=`OUTLET Pachnidło`, Stanowisko=`CENTR Kasa Centralna` — deliberately cross-Oddział, Magazyn=`OUT`). Subiekt's UI shows a **warning dialog** ("FORMULARZ ZAWIERA OSTRZEŻENIA") with the exact text:
+
+> "Stanowisko kasowe nie pochodzi z oddziału ustawionego na dokumencie."
+
+alongside an unrelated buyer-NIP warning (different concern, ignore). Crucially, this is a **soft warning with a "ZAPISZ MIMO TO" (save anyway) button** — not a hard block. This:
+
+- **Confirms** `StanowiskoKasoweZInnejJednostkiOrganizacyjnejBlad` is real and does fire for exactly this combination (Stanowisko linked to a different Oddział than the document's).
+- **Explains** why the reflection-based `Zapisz()` in §6 returned `false` with no visible detail: the desktop client's `Zapisz()` call must be routing through a warning-acknowledgment step (a confirmation callback or a pre-set "acknowledged warnings" flag) that the raw reflection call in `oddzial-test` does not provide, so Sfera's underlying save path treats an unacknowledged warning as a rejection when called headlessly.
+- **Does NOT explain** why the `MAG`-magazyn-only case in §6 (no Stanowisko touched at all) also failed — that combination shouldn't trigger this specific warning. That negative result is still unexplained; a candidate the operator has not yet reproduced in the UI is "Oddział changed without Magazyn kept in sync" (the UI likely auto-switches Magazyn when Oddział changes, per the screenshot showing `OUTLET`/`OUT` chosen together — the reflection probe set Magazyn and Oddział independently, which the UI may never allow the operator to do inconsistently in the first place).
+
+**Design principle, decided (2026-07-02)**: the bridge must NOT blindly ignore this warning (e.g. by unconditionally setting the underlying acknowledgment flag once found). The operator explicitly wants the bridge to reproduce the same UX Subiekt's own client gives — a confirmable warning, not a silently-overridden one. For the eventual issue #5 API contract, this means:
+- A caller-supplied Stanowisko/Oddział mismatch should come back from the bridge as a structured, retryable warning (e.g. a 409/422-style response carrying the warning text and a `confirmWarnings`-style flag the caller can resubmit with), not a hard, unrecoverable rejection AND not a silent auto-accept.
+- This mirrors the "ZAPISZ MIMO TO" gesture at the API level: first call surfaces the warning, a second call with explicit confirmation proceeds.
+- Finding the exact Sfera-side mechanism to (a) enumerate pending warnings before committing and (b) acknowledge them programmatically once the caller confirms is **not yet done** — the reflection dump's `Ostrzezenia`/`PosiadaOstrzezenia`-named properties found so far all belong to unrelated interfaces (fiscalization results, e-invoice generation, ZUS) rather than the pre-save document warning collection the desktop client uses. This is the next concrete technical unknown for whoever picks up issue #5's implementation.
