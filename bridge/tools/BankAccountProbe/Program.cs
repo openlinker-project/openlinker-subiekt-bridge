@@ -17,6 +17,14 @@
 //                                 accounts, and look for an Oddzial/JednostkaOrganizacyjna
 //                                 schema, to decide multi-Podmiot vs. Podmiot-with-Oddzialy
 //                                 before designing the invoice-contract payer selector.
+//   oddzial-test --oddzial N     - issue #5 write-side probe: create a THROWAWAY cash FV,
+//     --stanowisko N              set Dane.Oddzial + Dane.StanowiskoKasowe explicitly, and
+//                                 save it, to confirm whether Sfera rejects a Stanowisko
+//                                 Kasowe linked to a DIFFERENT Oddzial than the document's
+//                                 (StanowiskoKasoweZInnejJednostkiOrganizacyjnejBlad) or
+//                                 accepts an unlinked one from any Oddzial. Leaves the saved
+//                                 document in place (Sfera FV cannot be un-saved by the API;
+//                                 acceptable on a demo DB per explicit user sign-off).
 //
 // Config: reads the "Sfera" section of the legacy POC appsettings
 // (default C:\subiekt-poc\bridge\SferaApi\appsettings.json, override with --config).
@@ -118,6 +126,14 @@ try
             break;
         case "default-flag": DefaultFlagProbe(int.Parse(GetOpt("--account", "100007"))); break;
         case "podmioty": PodmiotyProbe(); break;
+        case "oddzial-test":
+            OddzialStanowiskoTest(
+                oddzialId: int.Parse(GetOpt("--oddzial", "100001")),
+                stanowiskoId: int.Parse(GetOpt("--stanowisko", "100065")),
+                setOddzial: !argsList.Contains("--skip-oddzial"),
+                setStanowisko: !argsList.Contains("--skip-stanowisko"),
+                magazynSymbol: GetOpt("--magazyn", "MAG"));
+            break;
         default: log.LogError("Unknown command {c}", command); break;
     }
 }
@@ -191,7 +207,7 @@ void Explore()
     Console.WriteLine("Dane.FormaPlatnosci (fresh BO)  = " + (acc.GetProperty(dane, dane.GetType(), "FormaPlatnosci") ?? "NULL"));
 }
 
-(int kontrahentId, string symbol) ResolveFixtures()
+(int kontrahentId, string symbol) ResolveFixtures(string magazynSymbol = "MAG")
 {
     using var conn = new SqlConnection(sqlConnString);
     conn.Open();
@@ -207,9 +223,10 @@ void Explore()
     using var c2 = conn.CreateCommand();
     c2.CommandText = @"SELECT TOP 1 a.Symbol FROM ModelDanychContainer.Asortymenty a
                        JOIN ModelDanychContainer.StanyMagazynowe sm ON sm.Asortyment_Id = a.Id AND sm.IloscDostepna > 1
-                       JOIN ModelDanychContainer.Magazyny m ON m.Id = sm.Magazyn_Id AND m.Symbol = 'MAG'
+                       JOIN ModelDanychContainer.Magazyny m ON m.Id = sm.Magazyn_Id AND m.Symbol = @mag
                        WHERE a.IsInRecycleBin = 0 ORDER BY a.Id";
-    var symbol = (string?)c2.ExecuteScalar() ?? throw new InvalidOperationException("no product with stock");
+    c2.Parameters.AddWithValue("@mag", magazynSymbol);
+    var symbol = (string?)c2.ExecuteScalar() ?? throw new InvalidOperationException($"no product with stock in magazyn '{magazynSymbol}'");
     return (kontrahentId, symbol);
 }
 
@@ -845,6 +862,119 @@ void PodmiotyProbe()
             Console.WriteLine($"  StanowiskoKasowe Id={AnyInt(r, 0)} Nazwa={(r.IsDBNull(1) ? "NULL" : r.GetString(1))} Symbol={(r.IsDBNull(2) ? "NULL" : r.GetString(2))} Opis={(r.IsDBNull(3) ? "" : r.GetString(3))} Oddzial_Id={(r.IsDBNull(4) ? "NULL (unlinked)" : AnyInt(r, 4).ToString())}");
         }
         Console.WriteLine($"  -> {count} Stanowisko(a) Kasowe found.");
+    }
+}
+
+// Issue #5 write-side probe: create a throwaway Cash FV, stamp an explicit
+// Oddzial + Stanowisko Kasowe on it, and observe whether Zapisz() accepts or
+// rejects the combination - settles whether the StanowiskoKasoweJednostkaOrganizacyjna
+// link table is a mandatory 1:1 FK or an optional restriction (see
+// docs/spikes/podmioty-oddzial-stanowisko-probe-findings.md s.3 for the read-side
+// half of this question).
+void OddzialStanowiskoTest(int oddzialId, int stanowiskoId, bool setOddzial = true, bool setStanowisko = true, string magazynSymbol = "MAG")
+{
+    var (kontrahentId, symbol) = ResolveFixtures(magazynSymbol);
+    log.LogInformation("Fixtures: kontrahent={k}, symbol={s}, oddzial={o}, stanowisko={st}", kontrahentId, symbol, oddzialId, stanowiskoId);
+
+    var iDok = SferaReflection.RequireType("InsERT.Moria.Dokumenty.Logistyka.IDokumentySprzedazy, InsERT.Moria.Dokumenty.Logistyka");
+    var facade = session.Uchwyt.PodajObiektTypu(iDok);
+    var bo = iDok.GetMethod("UtworzFaktureSprzedazy", F)!.Invoke(facade, null)!;
+    var boType = bo.GetType();
+    var dane = boType.GetProperty("Dane", F)!.GetValue(bo)!;
+    var daneType = dane.GetType();
+
+    acc.SetBoolFlag(bo, boType, "IgnorujBlokade", true);
+    acc.SetBoolFlag(bo, boType, "WylaczBlokowanieStanowPrzezRezerwacjeIlosciowa", true);
+    acc.SetBoolFlag(bo, boType, "NieSprawdzajRealizacji", true);
+
+    boType.GetMethod("UstawNabywceWedlugId", F, new[] { typeof(int) })!.Invoke(bo, new object[] { kontrahentId });
+    acc.SetProperty(dane, daneType, "DataSprzedazy", DateTime.Now);
+    acc.SetProperty(dane, daneType, "DataWydaniaWystawienia", DateTime.Now);
+
+    var poz = boType.GetMethod("Dodaj", F, new[] { typeof(string) })!.Invoke(bo, new object[] { symbol })!;
+    acc.SetProperty(poz, poz.GetType(), "Ilosc", 1m);
+    var cena = poz.GetType().GetProperty("Cena", F)?.GetValue(poz);
+    if (cena is not null)
+    {
+        acc.SetProperty(cena, cena.GetType(), "BruttoPrzedRabatem", 1.23m);
+        acc.SetProperty(cena, cena.GetType(), "BruttoPoRabacie", 1.23m);
+        acc.SetProperty(poz, poz.GetType(), "CenaRecznieEdytowana", true);
+    }
+    acc.InvokeIfExists(bo, boType, "Przelicz");
+
+    // Discover the actual property names before blind-setting - the reflection
+    // dump evidence names them "Oddzial" / "StanowiskoKasowe" but that's read
+    // from static metadata, not confirmed against THIS Dane entity's shape.
+    // On DokumentDS (FV) there is no property literally named "Oddzial" - the only
+    // JednostkaOrganizacyjna-typed nav is "MiejsceWprowadzenia" (place-of-entry/branch).
+    // Match by TYPE first (authoritative), name-substring as a fallback for other
+    // document types that might name it differently.
+    var oddzialProp = daneType.GetProperties(F).FirstOrDefault(p => p.PropertyType.Name == "JednostkaOrganizacyjna" && p.CanWrite)
+        ?? daneType.GetProperties(F).FirstOrDefault(p => p.Name.Contains("Oddzial", StringComparison.OrdinalIgnoreCase) && p.CanWrite);
+    var stanowiskoProp = daneType.GetProperties(F).FirstOrDefault(p => p.PropertyType.Name == "StanowiskoKasowe" && p.CanWrite)
+        ?? daneType.GetProperties(F).FirstOrDefault(p => p.Name.Contains("Stanowisko", StringComparison.OrdinalIgnoreCase) && p.CanWrite && p.PropertyType != typeof(Nullable<int>));
+    Console.WriteLine($"Dane.Oddzial* writable property: {(oddzialProp is null ? "NOT FOUND" : oddzialProp.Name + " : " + oddzialProp.PropertyType.Name)}");
+    Console.WriteLine($"Dane.Stanowisko* writable property: {(stanowiskoProp is null ? "NOT FOUND" : stanowiskoProp.Name + " : " + stanowiskoProp.PropertyType.Name)}");
+    if (oddzialProp is null || stanowiskoProp is null)
+    {
+        foreach (var p in daneType.GetProperties(F))
+            Console.WriteLine($"  [Dane prop] {p.PropertyType.Name} {p.Name} {{ {(p.CanRead ? "get; " : "")}{(p.CanWrite ? "set; " : "")}}}");
+        log.LogError("Cannot proceed without both properties - see the dump above for the actual names.");
+        return;
+    }
+
+    // Mirror the proven pattern from SferaDokumentySprzedazyService.ApplyExplicitPayment:
+    // set the paired "<Nav>Id" FK property and let EF fixup materialize the nav
+    // inside THIS document's own unit of work, instead of resolving via a facade
+    // (whose exact type name for Oddzial/Stanowisko is unconfirmed pre-probe).
+    bool SetByFkId(string navPropName, int id)
+    {
+        var idProp = daneType.GetProperty(navPropName + "Id", F);
+        if (idProp is null)
+        {
+            log.LogWarning("Dane.{prop} not found - cannot set {nav} via FK id", navPropName + "Id", navPropName);
+            return false;
+        }
+        idProp.SetValue(dane, id);
+        var navProp = daneType.GetProperty(navPropName, F);
+        var resolved = navProp?.GetValue(dane);
+        var resolvedId = resolved is null ? null : acc.GetProperty(resolved, resolved.GetType(), "Id");
+        log.LogInformation("Set {idProp}={id} -> Dane.{nav} resolved to Id={resolvedId}", navPropName + "Id", id, navPropName, resolvedId ?? "NULL (not resolved)");
+        return resolved is not null && Equals(resolvedId, id);
+    }
+
+    if (setOddzial) SetByFkId(oddzialProp.Name, oddzialId); else log.LogInformation("Skipping Oddzial set (isolation test)");
+    if (setStanowisko) SetByFkId(stanowiskoProp.Name, stanowiskoId); else log.LogInformation("Skipping StanowiskoKasowe set (isolation test)");
+
+    // Cash payment: StanowiskoKasoweWymaganeDlaDokumentowZPlatnosciamiNatychmiastowymiBlad
+    // says Stanowisko Kasowe matters most for immediate-payment documents.
+    var fpId = int.Parse(GetOpt("--fp", "1"));
+    ApplyPayment(bo, boType, dane, daneType, new PaymentPlan(Kind: "cash", FormaPlatnosciId: fpId, BankAccountId: null));
+
+    acc.InvokeIfExists(bo, boType, "IgnorujBlokadeRealizacjiPozycji");
+    acc.InvokeIfExists(bo, boType, "AutoSymbol");
+    acc.InvokeIfExists(bo, boType, "NadajNumer");
+
+    object? saved = null;
+    try
+    {
+        saved = boType.GetMethod("Zapisz", F, Type.EmptyTypes)!.Invoke(bo, null);
+    }
+    catch (TargetInvocationException tie)
+    {
+        Console.WriteLine($"RESULT: Zapisz() THREW {tie.InnerException?.GetType().Name}: {tie.InnerException?.Message}");
+        return;
+    }
+
+    if (saved is true)
+    {
+        var id = (int)acc.GetProperty(dane, daneType, "Id")!;
+        Console.WriteLine($"RESULT: ACCEPTED - saved FV id={id} under oddzial={oddzialId} stanowisko={stanowiskoId}");
+    }
+    else
+    {
+        Console.WriteLine($"RESULT: REJECTED - Zapisz()={saved}. " +
+            acc.CollectValidationErrors(bo, boType, includeDocumentLevel: true, includeStateHint: true));
     }
 }
 
