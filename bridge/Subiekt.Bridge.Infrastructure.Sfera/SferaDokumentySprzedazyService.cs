@@ -336,7 +336,10 @@ public sealed class SferaDokumentySprzedazyService
             // would risk false rejections on every install. Until the Oddzial/Platnik
             // selector lands (open work on issue #3), the CALLER must ensure
             // bankAccountId belongs to the intended payer; on multi-payer installs we
-            // log loudly so a cross-payer stamp is auditable instead of silent.
+            // log loudly so a cross-payer stamp is auditable instead of silent. This
+            // fires on EVERY transfer issuance on such installs (even correct picks) -
+            // once the selector lands, key it off an owner-vs-payer mismatch (or
+            // downgrade to LogInformation) so well-behaved callers stop paying the noise.
             if (sellerPodmiotCount > 1)
                 _log.LogWarning(
                     "Multi-payer install ({count} seller Podmioty): bank account {accountId} owned by Podmiot {ownerId} accepted WITHOUT validating it matches the document's payer (issue #3) - caller must ensure the account belongs to the intended payer",

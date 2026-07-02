@@ -715,8 +715,6 @@ object? FindByIdViaFacade(string facadeTypeName, Type entityType, int id)
     return znajdz.Invoke(facade, new object[] { lambda });
 }
 
-record PaymentPlan(string Kind, int FormaPlatnosciId, int? BankAccountId);
-
 // Issue #3 live-topology probe: enumerate every seller (MojaFirma) Podmiot and its
 // bank accounts, then look for any Oddzial/JednostkaOrganizacyjna schema, so a future
 // session can decide "multiple genuinely-separate Podmioty" vs. "one Podmiot with
@@ -773,7 +771,7 @@ void PodmiotyProbe()
             Console.WriteLine($"  table {r.GetString(0)}.{r.GetString(1)}");
         }
         if (!any)
-            Console.WriteLine("  -> no Oddzial/JednostkaOrganizacyjna-named table found (schema may model branches differently, e.g. via Podmiot.Rodzic/Nadrzedny — check IPodmioty facade members reflectively if this comes back empty).");
+            Console.WriteLine("  -> no Oddzial/JednostkaOrganizacyjna-named table found (schema may model branches differently, e.g. via Podmiot.Rodzic/Nadrzedny - check IPodmioty facade members reflectively if this comes back empty).");
     }
 
     Console.WriteLine("\n===== Podmiot columns referencing a parent/branch relationship =====");
@@ -791,3 +789,7 @@ void PodmiotyProbe()
             Console.WriteLine("  -> none found on Podmioty directly.");
     }
 }
+
+// Type declarations must come AFTER all top-level statements (including local
+// functions) in a top-level-statements file - CS8803 otherwise.
+record PaymentPlan(string Kind, int FormaPlatnosciId, int? BankAccountId);

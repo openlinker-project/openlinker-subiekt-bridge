@@ -86,11 +86,12 @@ Deferred to a follow-up issue once the live probe runs (tracked as an open item 
    FROM ModelDanychContainer.CentraGromadzeniaFinansow_RachunekBankowy rb
    JOIN ModelDanychContainer.CentraGromadzeniaFinansow cgf ON cgf.Id = rb.Id
    LEFT JOIN ModelDanychContainer.Waluty w ON w.Id = rb.Waluta_Id
-   LEFT JOIN ModelDanychContainer.Podmioty owner ON owner.Id = rb.Wlasciciel_Id
+   JOIN ModelDanychContainer.Podmioty owner ON owner.Id = rb.Wlasciciel_Id
    WHERE rb.Aktywny = 1
-     AND rb.Wlasciciel_Id IN (SELECT Id FROM ModelDanychContainer.Podmioty WHERE Typ = 2 AND Podtyp = 11)
+     AND owner.Typ = 2 AND owner.Podtyp = 11
    ORDER BY rb.Wlasciciel_Id, IsDefault DESC, rb.Id;
    ```
+   The seller scope lives on the inner-joined `owner` row (equivalent to an `IN (SELECT Id FROM Podmioty ...)` subquery, but the inner join states that the owner row always exists, so `OwnerName` nullability reflects only `Nazwa IS NULL` - review finding on PR #4).
    Update the class doc-comment to describe the multi-Podmiot enumeration.
 3. `Subiekt.Bridge.Infrastructure.Sfera/SferaRachunkiBankoweService.cs` — widen the pre-check `WHERE` clause the same way (`IN (...)` instead of `= (SELECT TOP 1 ...)`); no other logic changes (it already resolves `ownerId` per-row from the query result and looks up that specific Podmiot's business object, which is already topology-correct).
 4. `Subiekt.Bridge.Infrastructure.Sfera/SferaDokumentySprzedazyService.cs` (`ApplyExplicitPayment`, transfer pre-check around line 312) — same `IN (...)` widening.
