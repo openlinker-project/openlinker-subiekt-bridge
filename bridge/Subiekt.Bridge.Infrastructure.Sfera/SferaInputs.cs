@@ -42,7 +42,8 @@ public sealed record SferaInvoiceInput(
     DateTime DataSprzedazy,
     DateTime DataWydania,
     IReadOnlyList<SferaInvoiceLineInput> Lines,
-    SferaPaymentInput? Payment = null);
+    SferaPaymentInput? Payment = null,
+    int? StanowiskoKasoweId = null);
 
 /// <summary>
 /// Explicit payment selection for a sales document (issue #1). <see cref="Method"/>

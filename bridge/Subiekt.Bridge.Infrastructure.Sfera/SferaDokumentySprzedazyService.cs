@@ -157,6 +157,21 @@ public sealed class SferaDokumentySprzedazyService
         // 6. Recompute netto/VAT split from the manual gross prices.
         _acc.InvokeIfExists(bo, boType, "Przelicz");
 
+        // 6a. Explicit Stanowisko Kasowe selection (issue #5) - runs after the netto/VAT
+        //     recompute (step 6) but BEFORE the payment step (6b), since Sfera's
+        //     implicit-default cash-register resolution (fired by
+        //     DodajPlatnoscNatychmiastowa) reads the document's CURRENT station. Does NOT
+        //     select a branch (Oddzial) - live investigation
+        //     (docs/spikes/podmioty-oddzial-stanowisko-probe-findings.md s.8) proved a
+        //     document's operative Oddzial is fixed by the logged-in session's
+        //     IKontekstBiznesowy (read-only, session-bound), never a per-document field;
+        //     that scope was dropped after both patch-after-creation and
+        //     ParametryTworzeniaDokumentu-at-creation were tried live and failed identically.
+        if (dto.StanowiskoKasoweId is int stanowiskoKasoweId)
+        {
+            ApplyExplicitCashRegister(dane, daneType, stanowiskoKasoweId);
+        }
+
         // 6b. Payments. An EXPLICIT selection (issue #1) replaces the config-driven
         //     defaults; otherwise today's default calls fire verbatim (no regression).
         if (dto.Payment is { } payment)
@@ -261,6 +276,25 @@ public sealed class SferaDokumentySprzedazyService
 
         _log.LogInformation("{factory} saved: id={id} numer={numer}", factoryMethod, id, numer);
         return (id, numer);
+    }
+
+    // Apply an EXPLICIT Stanowisko Kasowe selection (issue #5). Verified live mechanism
+    // (docs/spikes/podmioty-oddzial-stanowisko-probe-findings.md s.6): set the paired
+    // "StanowiskoKasoweId" FK property and let EF fixup materialize the nav inside THIS
+    // document's own unit of work - the same pattern already proven for FormaPlatnosciId
+    // below. Does NOT touch the document's branch (Oddzial) - see s.8 for why that's not
+    // achievable per-document at all (the operative Oddzial comes from the logged-in
+    // session's read-only IKontekstBiznesowy, not a per-document field), so no
+    // cross-consistency check against an Oddzial is needed or possible here.
+    private void ApplyExplicitCashRegister(object dane, Type daneType, int stanowiskoKasoweId)
+    {
+        _acc.SetProperty(dane, daneType, "StanowiskoKasoweId", stanowiskoKasoweId);
+        var resolvedStanowisko = _acc.GetProperty(dane, daneType, "StanowiskoKasowe");
+        if (resolvedStanowisko is null
+            || !Equals(_acc.GetProperty(resolvedStanowisko, resolvedStanowisko.GetType(), "Id"), stanowiskoKasoweId))
+            throw new InvalidOperationException($"Nie udało się rozwiązać stanowiska kasowego {stanowiskoKasoweId} w kontekście dokumentu.");
+
+        _log.LogInformation("Explicit cash-register applied: stanowisko={stanowisko}", stanowiskoKasoweId);
     }
 
     // Apply an EXPLICIT payment selection (issue #1). Verified live mechanism

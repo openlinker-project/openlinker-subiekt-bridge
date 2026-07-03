@@ -86,11 +86,15 @@ public sealed class SferaInvoiceIssuer : IInvoiceIssuer
                 Currency: document.Currency)
             : null;
 
+        // Explicit Stanowisko Kasowe selection (issue #5) rides along the same way.
+        var stanowiskoKasoweId = document.CashRegister?.StanowiskoKasoweId;
+
         return new SferaInvoiceInput(
             KontrahentId: document.BuyerId,
             DataSprzedazy: fiscal.DataSprzedazy.LocalDateTime,
             DataWydania: fiscal.DataWydania.LocalDateTime,
             Lines: lines,
-            Payment: payment);
+            Payment: payment,
+            StanowiskoKasoweId: stanowiskoKasoweId);
     }
 }

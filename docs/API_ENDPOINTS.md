@@ -480,6 +480,40 @@ STRICT semantics (any other combination is rejected, HTTP 422 `validation`):
 - **Multi-payer caveat (issue #3)**: on installs with more than one seller Podmiot the bridge does NOT yet validate that the account's owning Podmiot matches the Podmiot the document is issued under — the caller must ensure `bankAccountId` belongs to the intended payer (pick from `GET /api/bank-accounts` by `ownerPodmiotId`). The bridge logs a warning on every such issuance until the Oddział/Płatnik selector lands (open work on issue #3).
 - The cash/transfer → `FormaPlatnosci` mapping is configurable: `Sfera:CashPaymentFormName` (default `gotówka`) and `Sfera:TransferPaymentFormName` (default `przelew`), matched case-insensitively among active payment forms.
 
+### `GET /api/branches` — seller branches (Oddziały), INFORMATIONAL ONLY (issue #5)
+Lists every Oddzial (`JednostkaOrganizacyjna`), independent of the seller Podmiot axis from issue #3 — a single-payer install can still have multiple branches. Read-only, served from the separate SQL connection.
+
+```json
+{ "success": true, "data": { "count": 2, "branches": [
+  { "id": 100001, "name": "Pachnidło" },
+  { "id": 100002, "name": "Centrum Handlowe" }
+] } }
+```
+
+**This endpoint is informational only — its `id` is NOT accepted anywhere on `POST /api/invoices`.** Live investigation (`docs/spikes/podmioty-oddzial-stanowisko-probe-findings.md` §8) proved a Subiekt document's operative branch comes from the **logged-in session's business context** (`IKontekstBiznesowy` — read-only, fixed per authenticated user), never from a per-document field. Neither patching the document after creation nor supplying the branch via its creation parameters overrides it; both were tried live against a real Sfera connection and both failed identically. Routing an invoice to a non-default branch would require the bridge to authenticate as a different Subiekt user per branch — a session-architecture change, not a per-invoice API parameter — and is out of scope. This endpoint exists so an operator/OL admin can see which branches are configured.
+
+### `GET /api/cash-registers` — cash-register stations (Stanowiska Kasowe) (issue #5)
+Lists every Stanowisko Kasowe. `id` is the value to pass as `stanowiskoKasoweId` on `POST /api/invoices` (the only functional selector this issue ships). `oddzialId` on each row (and the optional `?oddzialId=` filter) is informational only, per the note above — it does not gate which stations are usable.
+
+```json
+{ "success": true, "data": { "count": 4, "cashRegisters": [
+  { "id": 100065, "name": "Kasa Centralna", "symbol": "CENTR", "oddzialId": 100000 },
+  { "id": 100066, "name": "Kasa Outlet", "symbol": "OUTLET", "oddzialId": null }
+] } }
+```
+
+### Cash-register selection on `POST /api/invoices` (issue #5)
+One ADDITIVE, optional field selects the cash-register station explicitly; absent keeps today's implicit-default behavior (no regression):
+
+```json
+{ "stanowiskoKasoweId": 100066 }
+```
+
+- Absent → the document's implicit-default station applies (today's behavior).
+- Present → must be a positive id (400 `bad_request` otherwise); the document is issued using that station, with its branch left at the session's implicit default (see the `GET /api/branches` note above — branch cannot be selected).
+- Not supported for `documentType: "PA"` (422).
+- Live-verified end-to-end against a real Sfera connection (station-only selection saves successfully); see `docs/plans/implementation-plan-5-oddzial-stanowisko-selector.md` for the full investigation that led to this scope.
+
 ### `POST /api/customers/upsert` — address & dedup
 - Dedup by `nip`: a repeat upsert of an existing NIP returns the existing `id` (keep-existing policy; no overwrite — logged).
 - Optional structured `address` maps onto `AdresPodstawowy` (`ulica/nrDomu/nrLokalu/kodPocztowy/miejscowosc/poczta`).

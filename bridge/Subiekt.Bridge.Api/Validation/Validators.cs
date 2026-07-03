@@ -121,6 +121,12 @@ public sealed class CreateInvoiceRequestValidator : AbstractValidator<CreateInvo
             .Must(id => !id.HasValue || id.Value > 0)
             .WithMessage("BankAccountId musi być dodatnie.");
 
+        // Issue #5 cash-register field: SHAPE only (positivity). The Domain
+        // CashRegisterSelection rule surfaces as 422 via the build-failure path.
+        RuleFor(x => x.StanowiskoKasoweId)
+            .Must(id => !id.HasValue || id.Value > 0)
+            .WithMessage("StanowiskoKasoweId musi być dodatnie.");
+
         // Either an explicit KontrahentId, or an inline buyer with a name, must be
         // present so the invoice has a payer.
         RuleFor(x => x)

@@ -96,5 +96,65 @@ against Sfera before this session.
 ## 5. Open items for issue #5's wire-contract design (unresolved by this probe)
 
 - Whether "Płatnik" (the operator's term) maps to `Podmiot` (issue #3's model) or `JednostkaOrganizacyjna`/Oddział — this demo data suggests they're independent axes (1 Podmiot, 2 Oddziały), so the operator's real install likely needs **both** a payer selector (Podmiot, if truly multi-payer) **and** a branch selector (Oddział) as separate fields, not one collapsed concept.
-- The cross-Oddział rejection behavior for Stanowisko Kasowe (see §3) needs a live write-side check, not just a read-side probe.
+- ~~The cross-Oddział rejection behavior for Stanowisko Kasowe (see §3) needs a live write-side check~~ — attempted this session (§6 below); result is inconclusive and **revises the theory again**.
 - `StanowiskoKasoweWymaganeDlaDokumentowZPlatnosciamiNatychmiastowymiBlad` (cash documents require a Stanowisko Kasowe) still needs to be traced to whichever implicit default `SferaDokumentySprzedazyService`'s existing Cash-issuance path resolves today — not done this session (requires reading/instrumenting the issuance code path, not just the read-only schema).
+
+## 6. Write-side probe (2026-07-02, `oddzial-test` subcommand, live on `Nexo_Demo_1`)
+
+Ran with explicit user sign-off to issue throwaway Cash FVs on the demo DB. **First, a property-mapping finding, confirmed live**: a `DokumentDS` (FV) entity has no property literally named "Oddzial" — the document's branch/place-of-entry field is `Dane.MiejsceWprowadzenia` (type `JednostkaOrganizacyjna`, paired FK `MiejsceWprowadzeniaId`), matching a debug-log field already present in production `SferaDokumentySprzedazyService.Create`. `Dane.StanowiskoKasowe`/`StanowiskoKasoweId` is a separate, independently-settable nav, exactly as expected.
+
+**Isolation results** (fixed buyer=100026, cash payment, FormaPlatnosci=1 "Gotówka"):
+
+| MiejsceWprowadzenia set? | StanowiskoKasowe set? | Magazyn used | Result |
+|---|---|---|---|
+| no (baseline `cash` cmd) | no | MAG (default) | ACCEPTED |
+| Oddział 100001 (Pachnidło) | Stanowisko 100065 (linked to Centrala/100000 — cross-Oddział) | MAG | **REJECTED** (generic: "Zapisz=false, MoznaZapisac=False" — no specific error class surfaced) |
+| Oddział 100001 | Stanowisko 100066 (unlinked) | MAG | **REJECTED** (same generic message) |
+| Oddział 100001 | *(skipped — untouched)* | MAG | **REJECTED** (same generic message) |
+| *(skipped — untouched)* | Stanowisko 100065 (cross-Oddział-linked) | MAG | **ACCEPTED** |
+| Oddział 100001 | Stanowisko 100065 | **OUT** (confirmed linked to Oddział 100001 via `MagazynJednostkaOrganizacyjna`) | **REJECTED** (same generic message) |
+
+**Revised reading**: setting `Dane.MiejsceWprowadzenia` (Oddział) to anything other than the implicit default breaks `Zapisz()` **on its own**, independent of `StanowiskoKasowe` (which is freely settable, including cross-Oddział-linked, with zero rejection when `MiejsceWprowadzenia` is left alone). This means:
+- The original `StanowiskoKasoweZInnejJednostkiOrganizacyjnejBlad` cross-Oddział theory from issue #5's body is **not confirmed by this probe** — the rejection reproduces with *any* Stanowisko choice (including none at all) the moment `MiejsceWprowadzenia` is touched, so it cannot be isolated to a Stanowisko/Oddział conflict specifically.
+- Swapping to a Magazyn confirmed linked to the target Oddział (`OUT`) did **not** fix it either, ruling out the simplest "Magazyn/Oddział mismatch" explanation.
+- The rejection message is Sfera's generic no-detail fallback (`MoznaZapisac=False`, no `InvalidData`/document-level message captured by `SferaObjectAccessor.CollectValidationErrors`) — the real constraint is not visible through this reflection-based diagnostic path. Candidates not yet tried: explicitly setting `Dane.MagazynId`/`Dane.MojaFirmaId` to match the chosen Oddział, checking `PozycjaDokumentu`-level Magazyn (line items may carry their own Magazyn independent of the document header), or a from-the-UI trace (issue the same combination through the actual Subiekt desktop client and see what error IT surfaces, since the reflection layer clearly isn't seeing everything Subiekt checks).
+- **Practical implication for issue #5**: whatever gates `MiejsceWprowadzenia` changes is a bigger unknown than originally scoped, and blocks any FV from being issued under a non-default Oddział at all via this reflection path — this is more fundamental than the narrower Stanowisko-Kasowe question the issue was framed around. This needs either a UI-driven trace or Sfera support/docs, not more blind reflection probing, before committing further engineering time.
+
+Throwaway FVs created and left in place on the demo DB during this probe: ids 102367 (baseline cash), 102369 (Stanowisko-only, accepted). The rejected attempts created no document (Zapisz returned false, nothing persisted).
+
+## 7. UI trace confirms the mechanism (2026-07-02, operator's own manual test)
+
+The operator manually reproduced the same scenario through the actual Subiekt desktop client (Oddział=`OUTLET Pachnidło`, Stanowisko=`CENTR Kasa Centralna` — deliberately cross-Oddział, Magazyn=`OUT`). Subiekt's UI shows a **warning dialog** ("FORMULARZ ZAWIERA OSTRZEŻENIA") with the exact text:
+
+> "Stanowisko kasowe nie pochodzi z oddziału ustawionego na dokumencie."
+
+alongside an unrelated buyer-NIP warning (different concern, ignore). Crucially, this is a **soft warning with a "ZAPISZ MIMO TO" (save anyway) button** — not a hard block. This:
+
+- **Confirms** `StanowiskoKasoweZInnejJednostkiOrganizacyjnejBlad` is real and does fire for exactly this combination (Stanowisko linked to a different Oddział than the document's).
+- **Explains** why the reflection-based `Zapisz()` in §6 returned `false` with no visible detail: the desktop client's `Zapisz()` call must be routing through a warning-acknowledgment step (a confirmation callback or a pre-set "acknowledged warnings" flag) that the raw reflection call in `oddzial-test` does not provide, so Sfera's underlying save path treats an unacknowledged warning as a rejection when called headlessly.
+- **Does NOT explain** why the `MAG`-magazyn-only case in §6 (no Stanowisko touched at all) also failed — that combination shouldn't trigger this specific warning. That negative result is still unexplained; a candidate the operator has not yet reproduced in the UI is "Oddział changed without Magazyn kept in sync" (the UI likely auto-switches Magazyn when Oddział changes, per the screenshot showing `OUTLET`/`OUT` chosen together — the reflection probe set Magazyn and Oddział independently, which the UI may never allow the operator to do inconsistently in the first place).
+
+**Design principle, decided (2026-07-02)**: the bridge must NOT blindly ignore this warning (e.g. by unconditionally setting the underlying acknowledgment flag once found). The operator explicitly wants the bridge to reproduce the same UX Subiekt's own client gives — a confirmable warning, not a silently-overridden one. For the eventual issue #5 API contract, this means:
+- A caller-supplied Stanowisko/Oddział mismatch should come back from the bridge as a structured, retryable warning (e.g. a 409/422-style response carrying the warning text and a `confirmWarnings`-style flag the caller can resubmit with), not a hard, unrecoverable rejection AND not a silent auto-accept.
+- This mirrors the "ZAPISZ MIMO TO" gesture at the API level: first call surfaces the warning, a second call with explicit confirmation proceeds.
+- Finding the exact Sfera-side mechanism to (a) enumerate pending warnings before committing and (b) acknowledge them programmatically once the caller confirms is **not yet done** — the reflection dump's `Ostrzezenia`/`PosiadaOstrzezenia`-named properties found so far all belong to unrelated interfaces (fiscalization results, e-invoice generation, ZUS) rather than the pre-save document warning collection the desktop client uses. This is the next concrete technical unknown for whoever picks up issue #5's implementation.
+
+## 8. DEFINITIVE finding (2026-07-03): branch (Oddzial) is session-bound, not per-document - routing is not achievable at all
+
+A second independent tech-review pass on the shipped PR #6 caught that the "live-verified" runs in the implementation plan never actually proved a non-default Oddzial works: the only ACCEPTED run that set an Oddzial used `100000` (the head-office/Centrala unit - the document's implicit default, excluded from `GET /api/branches`), not a real branch. Every attempt with a real branch (`100001`) had been rejected in §6, for a reason distinct from the Stanowisko-Oddzial warning §7 confirmed. Two further live experiments settled it:
+
+1. **`ParametryTworzeniaDokumentu` at creation time** - the reflection dump (`bridge/tools/SferaInspect/api-dump-api.txt`) surfaces `InsERT.Moria.Dokumenty.Logistyka.ParametryTworzeniaDokumentu { Magazyn, Oddzial, StanowiskoKasowe }`, passed to a generic `Utworz(Konfiguracja, ParametryTworzeniaDokumentu)` factory overload - a plausible "correct" creation-time mechanism, as opposed to patching `Dane.MiejsceWprowadzenia` after the fact. Live test (`parametry-test` probe subcommand) confirmed the facade DOES implement this overload, resolved a working `Konfiguracja`, and successfully created a document with `Dane.MiejsceWprowadzenia = 100001` (a real branch) from the start. **Result: still REJECTED**, with the exact same generic `Zapisz()=False` message as every §6 attempt. This ruled out "wrong API for setting Oddzial" as the cause.
+
+2. **`IKontekstBiznesowy` (session business context)** - the reflection dump's `InsERT.Moria.IKontekstBiznesowy` interface carries `Oddzial`, `Magazyn`, `StanowiskoKasowe`, `Podmiot`, `RachunekBankowy`, `Pracownik`, `Uzytkownik` etc., **all as get-only properties** (no setters at all). A new `uchwyt-context-dump` probe subcommand resolved it live via `Uchwyt.PodajObiektTypu` and dumped its actual values for the bridge's persistent "Szef" session:
+   ```
+   Oddzial              = Entity (of type Centrala) Id=100000
+   Magazyn              = Entity (of type Magazyn)  Id=100000  (MAG)
+   StanowiskoKasowe     = Entity (of type StanowiskoKasowe) Id=100065  (Kasa Centralna)
+   RachunekBankowy      = Entity (of type RachunekBankowy) Id=100004
+   Podmiot              = Entity (of type PodmiotMojaFirma) Id=100007
+   ```
+   This is **exactly** the implicit-default set observed throughout every prior probe in this document (Centrala/MAG/Kasa Centralna) - confirming it is the session's fixed, read-only operative context, not derived per-document.
+
+**Conclusion**: a Subiekt document's operative Oddzial (and Magazyn, and default Stanowisko/RachunekBankowy) comes from the **logged-in session's business context**, not any per-document field. Neither patching a field after creation nor supplying it via the document-creation parameters overrides it - both were tried live and both failed identically, because neither touches `IKontekstBiznesowy`, which has no setter at all in this reflection dump. Routing an invoice to a non-default branch would require the bridge to authenticate a **different Subiekt user** whose own configured workplace/context is bound to that branch - a session-architecture change (e.g. one Sfera session per branch, selected per-request), not a per-invoice API parameter. This is out of scope for issue #5 as originally framed.
+
+**Scope decision (2026-07-03, operator)**: PR #6 rescoped down to Stanowisko Kasowe selection only (`stanowiskoKasoweId` on `POST /api/invoices`, live-verified working with the implicit-default branch). `oddzialId` was removed from the write contract entirely - `GET /api/branches` is kept as an informational-only listing (an operator/OL admin can see configured branches exist) but does not feed into invoice issuance. `BranchSelection` (Domain) was renamed to `CashRegisterSelection` and simplified to a single field. A future "multi-session-per-branch" bridge architecture is a separate, larger epic if branch routing is ever required - not attempted here.

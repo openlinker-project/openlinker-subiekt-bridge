@@ -101,6 +101,14 @@ public class CreateInvoiceRequestDto
 
     // Subiekt bank-account id, as returned by GET /api/bank-accounts.
     public int? BankAccountId { get; set; }
+
+    // Issue #5: EXPLICIT cash-register (Stanowisko Kasowe) selection (additive; optional).
+    // Absent = today's implicit-default behavior (no regression). Not supported for
+    // DocumentType "PA". See GET /api/cash-registers for valid ids. Does NOT select a
+    // branch (Oddzial) - per-invoice branch routing is not supported at all (a document's
+    // Oddzial is fixed by the logged-in session's business context, not a per-document
+    // field - see docs/spikes/podmioty-oddzial-stanowisko-probe-findings.md s.8).
+    public int? StanowiskoKasoweId { get; set; }
 }
 
 public class BuyerDto

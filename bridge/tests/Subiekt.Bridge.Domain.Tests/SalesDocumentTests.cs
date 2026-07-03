@@ -55,6 +55,56 @@ public class SalesDocumentTests
         Assert.Equal("doc.payment.pa", result.Error.Code);
     }
 
+    // --- issue #5: explicit Stanowisko Kasowe selection on the aggregate ---
+
+    [Fact]
+    public void Create_WithoutCashRegister_HasNullCashRegister()
+    {
+        var doc = Doc(Line("A", 1, 10m));
+
+        Assert.Null(doc.CashRegister);
+    }
+
+    [Fact]
+    public void Create_FvWithCashRegister_CarriesSelection()
+    {
+        var cashRegister = CashRegisterSelection.TryCreate(100066).Value;
+
+        var result = SalesDocument.Create(
+            DocumentType.FV, buyerId: 1, Pln, DateTimeOffset.Now,
+            new[] { Line("A", 1, 10m) }, payment: null, cashRegister: cashRegister);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(100066, result.Value.CashRegister!.StanowiskoKasoweId);
+    }
+
+    [Fact]
+    public void Create_PaWithCashRegister_IsRejected()
+    {
+        var cashRegister = CashRegisterSelection.TryCreate(100066).Value;
+
+        var result = SalesDocument.Create(
+            DocumentType.PA, buyerId: 1, Pln, DateTimeOffset.Now,
+            new[] { Line("A", 1, 10m) }, payment: null, cashRegister: cashRegister);
+
+        Assert.True(result.IsFailure);
+        Assert.Equal("doc.cashRegister.pa", result.Error.Code);
+    }
+
+    [Fact]
+    public void FoldDiscounts_PreservesCashRegisterSelection()
+    {
+        var cashRegister = CashRegisterSelection.TryCreate(100066).Value;
+        var doc = SalesDocument.Create(
+            DocumentType.FV, buyerId: 1, Pln, DateTimeOffset.Now,
+            new[] { Line("A", 2, 100m), Line("DISC", 1, -30m) }, payment: null, cashRegister: cashRegister).Value;
+
+        var folded = doc.FoldDiscounts();
+
+        Assert.NotNull(folded.CashRegister);
+        Assert.Equal(100066, folded.CashRegister!.StanowiskoKasoweId);
+    }
+
     [Fact]
     public void FoldDiscounts_PreservesPaymentSelection()
     {

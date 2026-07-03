@@ -80,7 +80,14 @@ public static class InvoiceContractMapper
         if (paymentResult.IsFailure)
             return Result.Failure<(SalesDocument, InlineBuyer?)>(paymentResult.Error);
 
-        var docResult = SalesDocument.Create(documentType, buyerId, currency, issueDate, lines, paymentResult.Value);
+        // Issue #5: explicit Stanowisko Kasowe selection. No Oddzial selection - see
+        // CashRegisterSelection's doc-comment for why per-invoice branch routing isn't
+        // achievable at all.
+        var cashRegisterResult = CashRegisterSelection.TryCreate(req.StanowiskoKasoweId);
+        if (cashRegisterResult.IsFailure)
+            return Result.Failure<(SalesDocument, InlineBuyer?)>(cashRegisterResult.Error);
+
+        var docResult = SalesDocument.Create(documentType, buyerId, currency, issueDate, lines, paymentResult.Value, cashRegisterResult.Value);
         if (docResult.IsFailure)
             return Result.Failure<(SalesDocument, InlineBuyer?)>(docResult.Error);
 

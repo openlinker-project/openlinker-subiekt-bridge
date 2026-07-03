@@ -17,6 +17,19 @@
 //                                 accounts, and look for an Oddzial/JednostkaOrganizacyjna
 //                                 schema, to decide multi-Podmiot vs. Podmiot-with-Oddzialy
 //                                 before designing the invoice-contract payer selector.
+//   cash-register-issuance-test   - issue #5: exercise the REAL production
+//     --stanowisko N               SferaDokumentySprzedazyService.ApplyExplicitCashRegister
+//                                 end-to-end via UtworzFaktura. Stanowisko-only (branch
+//                                 selection was dropped - see oddzial-test/parametry-test/
+//                                 uchwyt-context-dump below for why it's not achievable).
+//   oddzial-test --oddzial N     - issue #5 write-side probe: create a THROWAWAY cash FV,
+//     --stanowisko N              set Dane.Oddzial + Dane.StanowiskoKasowe explicitly, and
+//                                 save it, to confirm whether Sfera rejects a Stanowisko
+//                                 Kasowe linked to a DIFFERENT Oddzial than the document's
+//                                 (StanowiskoKasoweZInnejJednostkiOrganizacyjnejBlad) or
+//                                 accepts an unlinked one from any Oddzial. Leaves the saved
+//                                 document in place (Sfera FV cannot be un-saved by the API;
+//                                 acceptable on a demo DB per explicit user sign-off).
 //
 // Config: reads the "Sfera" section of the legacy POC appsettings
 // (default C:\subiekt-poc\bridge\SferaApi\appsettings.json, override with --config).
@@ -118,6 +131,23 @@ try
             break;
         case "default-flag": DefaultFlagProbe(int.Parse(GetOpt("--account", "100007"))); break;
         case "podmioty": PodmiotyProbe(); break;
+        case "cash-register-issuance-test":
+            CashRegisterIssuanceTest(stanowiskoId: int.Parse(GetOpt("--stanowisko", "100066")));
+            break;
+        case "oddzial-test":
+            OddzialStanowiskoTest(
+                oddzialId: int.Parse(GetOpt("--oddzial", "100001")),
+                stanowiskoId: int.Parse(GetOpt("--stanowisko", "100065")),
+                setOddzial: !argsList.Contains("--skip-oddzial"),
+                setStanowisko: !argsList.Contains("--skip-stanowisko"),
+                magazynSymbol: GetOpt("--magazyn", "MAG"));
+            break;
+        case "parametry-test":
+            ParametryTworzeniaTest(
+                oddzialId: int.Parse(GetOpt("--oddzial", "100001")),
+                stanowiskoId: int.Parse(GetOpt("--stanowisko", "100066")));
+            break;
+        case "uchwyt-context-dump": UchwytContextDump(); break;
         default: log.LogError("Unknown command {c}", command); break;
     }
 }
@@ -191,7 +221,7 @@ void Explore()
     Console.WriteLine("Dane.FormaPlatnosci (fresh BO)  = " + (acc.GetProperty(dane, dane.GetType(), "FormaPlatnosci") ?? "NULL"));
 }
 
-(int kontrahentId, string symbol) ResolveFixtures()
+(int kontrahentId, string symbol) ResolveFixtures(string magazynSymbol = "MAG")
 {
     using var conn = new SqlConnection(sqlConnString);
     conn.Open();
@@ -207,9 +237,10 @@ void Explore()
     using var c2 = conn.CreateCommand();
     c2.CommandText = @"SELECT TOP 1 a.Symbol FROM ModelDanychContainer.Asortymenty a
                        JOIN ModelDanychContainer.StanyMagazynowe sm ON sm.Asortyment_Id = a.Id AND sm.IloscDostepna > 1
-                       JOIN ModelDanychContainer.Magazyny m ON m.Id = sm.Magazyn_Id AND m.Symbol = 'MAG'
+                       JOIN ModelDanychContainer.Magazyny m ON m.Id = sm.Magazyn_Id AND m.Symbol = @mag
                        WHERE a.IsInRecycleBin = 0 ORDER BY a.Id";
-    var symbol = (string?)c2.ExecuteScalar() ?? throw new InvalidOperationException("no product with stock");
+    c2.Parameters.AddWithValue("@mag", magazynSymbol);
+    var symbol = (string?)c2.ExecuteScalar() ?? throw new InvalidOperationException($"no product with stock in magazyn '{magazynSymbol}'");
     return (kontrahentId, symbol);
 }
 
@@ -250,6 +281,35 @@ void ServiceBaseline()
     var (id, numer) = svc.UtworzFaktura(session, input);
     log.LogInformation("Service created FV id={id} numer={n}", id, numer);
     ReadBack(id);
+}
+
+// Issue #5: exercise the REAL production SferaDokumentySprzedazyService.ApplyExplicitCashRegister
+// end-to-end (not the standalone reflection experiment in OddzialStanowiskoTest), to verify
+// the shipped FK-fixup actually works through the real class. Stanowisko-only - branch
+// (Oddzial) selection was dropped after live investigation proved it's not achievable
+// per-document (see docs/spikes/podmioty-oddzial-stanowisko-probe-findings.md s.8).
+void CashRegisterIssuanceTest(int stanowiskoId)
+{
+    var (kontrahentId, symbol) = ResolveFixtures();
+    log.LogInformation("Fixtures: kontrahent={k}, symbol={s}, stanowisko={st}", kontrahentId, symbol, stanowiskoId);
+    var svc = new SferaDokumentySprzedazyService(loggerFactory.CreateLogger<SferaDokumentySprzedazyService>(), Options.Create(opt));
+    var input = new SferaInvoiceInput(
+        KontrahentId: kontrahentId,
+        DataSprzedazy: DateTime.Now,
+        DataWydania: DateTime.Now,
+        Lines: new[] { new SferaInvoiceLineInput(symbol, 1m, 1.23m, "23", null) },
+        Payment: new SferaPaymentInput("cash", null, "PLN"),
+        StanowiskoKasoweId: stanowiskoId);
+    try
+    {
+        var (id, numer) = svc.UtworzFaktura(session, input);
+        Console.WriteLine($"RESULT: ACCEPTED - saved FV id={id} numer={numer} stanowisko={stanowiskoId}");
+        ReadBack(id);
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"RESULT: REJECTED - {ex.GetType().Name}: {ex.Message}");
+    }
 }
 
 void CreateFv(PaymentPlan? payment)
@@ -845,6 +905,297 @@ void PodmiotyProbe()
             Console.WriteLine($"  StanowiskoKasowe Id={AnyInt(r, 0)} Nazwa={(r.IsDBNull(1) ? "NULL" : r.GetString(1))} Symbol={(r.IsDBNull(2) ? "NULL" : r.GetString(2))} Opis={(r.IsDBNull(3) ? "" : r.GetString(3))} Oddzial_Id={(r.IsDBNull(4) ? "NULL (unlinked)" : AnyInt(r, 4).ToString())}");
         }
         Console.WriteLine($"  -> {count} Stanowisko(a) Kasowe found.");
+    }
+}
+
+// Issue #5 write-side probe: create a throwaway Cash FV, stamp an explicit
+// Oddzial + Stanowisko Kasowe on it, and observe whether Zapisz() accepts or
+// rejects the combination - settles whether the StanowiskoKasoweJednostkaOrganizacyjna
+// link table is a mandatory 1:1 FK or an optional restriction (see
+// docs/spikes/podmioty-oddzial-stanowisko-probe-findings.md s.3 for the read-side
+// half of this question).
+void OddzialStanowiskoTest(int oddzialId, int stanowiskoId, bool setOddzial = true, bool setStanowisko = true, string magazynSymbol = "MAG")
+{
+    var (kontrahentId, symbol) = ResolveFixtures(magazynSymbol);
+    log.LogInformation("Fixtures: kontrahent={k}, symbol={s}, oddzial={o}, stanowisko={st}", kontrahentId, symbol, oddzialId, stanowiskoId);
+
+    var iDok = SferaReflection.RequireType("InsERT.Moria.Dokumenty.Logistyka.IDokumentySprzedazy, InsERT.Moria.Dokumenty.Logistyka");
+    var facade = session.Uchwyt.PodajObiektTypu(iDok);
+    var bo = iDok.GetMethod("UtworzFaktureSprzedazy", F)!.Invoke(facade, null)!;
+    var boType = bo.GetType();
+    var dane = boType.GetProperty("Dane", F)!.GetValue(bo)!;
+    var daneType = dane.GetType();
+
+    acc.SetBoolFlag(bo, boType, "IgnorujBlokade", true);
+    acc.SetBoolFlag(bo, boType, "WylaczBlokowanieStanowPrzezRezerwacjeIlosciowa", true);
+    acc.SetBoolFlag(bo, boType, "NieSprawdzajRealizacji", true);
+
+    boType.GetMethod("UstawNabywceWedlugId", F, new[] { typeof(int) })!.Invoke(bo, new object[] { kontrahentId });
+    acc.SetProperty(dane, daneType, "DataSprzedazy", DateTime.Now);
+    acc.SetProperty(dane, daneType, "DataWydaniaWystawienia", DateTime.Now);
+
+    var poz = boType.GetMethod("Dodaj", F, new[] { typeof(string) })!.Invoke(bo, new object[] { symbol })!;
+    acc.SetProperty(poz, poz.GetType(), "Ilosc", 1m);
+    var cena = poz.GetType().GetProperty("Cena", F)?.GetValue(poz);
+    if (cena is not null)
+    {
+        acc.SetProperty(cena, cena.GetType(), "BruttoPrzedRabatem", 1.23m);
+        acc.SetProperty(cena, cena.GetType(), "BruttoPoRabacie", 1.23m);
+        acc.SetProperty(poz, poz.GetType(), "CenaRecznieEdytowana", true);
+    }
+    acc.InvokeIfExists(bo, boType, "Przelicz");
+
+    // Discover the actual property names before blind-setting - the reflection
+    // dump evidence names them "Oddzial" / "StanowiskoKasowe" but that's read
+    // from static metadata, not confirmed against THIS Dane entity's shape.
+    // On DokumentDS (FV) there is no property literally named "Oddzial" - the only
+    // JednostkaOrganizacyjna-typed nav is "MiejsceWprowadzenia" (place-of-entry/branch).
+    // Match by TYPE first (authoritative), name-substring as a fallback for other
+    // document types that might name it differently.
+    var oddzialProp = daneType.GetProperties(F).FirstOrDefault(p => p.PropertyType.Name == "JednostkaOrganizacyjna" && p.CanWrite)
+        ?? daneType.GetProperties(F).FirstOrDefault(p => p.Name.Contains("Oddzial", StringComparison.OrdinalIgnoreCase) && p.CanWrite);
+    var stanowiskoProp = daneType.GetProperties(F).FirstOrDefault(p => p.PropertyType.Name == "StanowiskoKasowe" && p.CanWrite)
+        ?? daneType.GetProperties(F).FirstOrDefault(p => p.Name.Contains("Stanowisko", StringComparison.OrdinalIgnoreCase) && p.CanWrite && p.PropertyType != typeof(Nullable<int>));
+    Console.WriteLine($"Dane.Oddzial* writable property: {(oddzialProp is null ? "NOT FOUND" : oddzialProp.Name + " : " + oddzialProp.PropertyType.Name)}");
+    Console.WriteLine($"Dane.Stanowisko* writable property: {(stanowiskoProp is null ? "NOT FOUND" : stanowiskoProp.Name + " : " + stanowiskoProp.PropertyType.Name)}");
+    if (oddzialProp is null || stanowiskoProp is null)
+    {
+        foreach (var p in daneType.GetProperties(F))
+            Console.WriteLine($"  [Dane prop] {p.PropertyType.Name} {p.Name} {{ {(p.CanRead ? "get; " : "")}{(p.CanWrite ? "set; " : "")}}}");
+        log.LogError("Cannot proceed without both properties - see the dump above for the actual names.");
+        return;
+    }
+
+    // Mirror the proven pattern from SferaDokumentySprzedazyService.ApplyExplicitPayment:
+    // set the paired "<Nav>Id" FK property and let EF fixup materialize the nav
+    // inside THIS document's own unit of work, instead of resolving via a facade
+    // (whose exact type name for Oddzial/Stanowisko is unconfirmed pre-probe).
+    bool SetByFkId(string navPropName, int id)
+    {
+        var idProp = daneType.GetProperty(navPropName + "Id", F);
+        if (idProp is null)
+        {
+            log.LogWarning("Dane.{prop} not found - cannot set {nav} via FK id", navPropName + "Id", navPropName);
+            return false;
+        }
+        idProp.SetValue(dane, id);
+        var navProp = daneType.GetProperty(navPropName, F);
+        var resolved = navProp?.GetValue(dane);
+        var resolvedId = resolved is null ? null : acc.GetProperty(resolved, resolved.GetType(), "Id");
+        log.LogInformation("Set {idProp}={id} -> Dane.{nav} resolved to Id={resolvedId}", navPropName + "Id", id, navPropName, resolvedId ?? "NULL (not resolved)");
+        return resolved is not null && Equals(resolvedId, id);
+    }
+
+    if (setOddzial) SetByFkId(oddzialProp.Name, oddzialId); else log.LogInformation("Skipping Oddzial set (isolation test)");
+    if (setStanowisko) SetByFkId(stanowiskoProp.Name, stanowiskoId); else log.LogInformation("Skipping StanowiskoKasowe set (isolation test)");
+
+    // Cash payment: StanowiskoKasoweWymaganeDlaDokumentowZPlatnosciamiNatychmiastowymiBlad
+    // says Stanowisko Kasowe matters most for immediate-payment documents.
+    var fpId = int.Parse(GetOpt("--fp", "1"));
+    ApplyPayment(bo, boType, dane, daneType, new PaymentPlan(Kind: "cash", FormaPlatnosciId: fpId, BankAccountId: null));
+
+    acc.InvokeIfExists(bo, boType, "IgnorujBlokadeRealizacjiPozycji");
+    acc.InvokeIfExists(bo, boType, "AutoSymbol");
+    acc.InvokeIfExists(bo, boType, "NadajNumer");
+
+    object? saved = null;
+    try
+    {
+        saved = boType.GetMethod("Zapisz", F, Type.EmptyTypes)!.Invoke(bo, null);
+    }
+    catch (TargetInvocationException tie)
+    {
+        Console.WriteLine($"RESULT: Zapisz() THREW {tie.InnerException?.GetType().Name}: {tie.InnerException?.Message}");
+        return;
+    }
+
+    if (saved is true)
+    {
+        var id = (int)acc.GetProperty(dane, daneType, "Id")!;
+        Console.WriteLine($"RESULT: ACCEPTED - saved FV id={id} under oddzial={oddzialId} stanowisko={stanowiskoId}");
+    }
+    else
+    {
+        Console.WriteLine($"RESULT: REJECTED - Zapisz()={saved}. " +
+            acc.CollectValidationErrors(bo, boType, includeDocumentLevel: true, includeStateHint: true));
+    }
+}
+
+// Issue #5 follow-up probe (2026-07-02): docs/spikes/podmioty-oddzial-stanowisko-probe-findings.md
+// s.6-7 found that patching Dane.MiejsceWprowadzenia AFTER document creation always fails to
+// save under a non-default Oddzial, for a reason distinct from the Stanowisko-Oddzial warning.
+// The reflection dump (bridge/tools/SferaInspect/api-dump-api.txt) reveals a
+// InsERT.Moria.Dokumenty.Logistyka.ParametryTworzeniaDokumentu class (Magazyn + Oddzial +
+// StanowiskoKasowe together) accepted by a generic Utworz(Konfiguracja, ParametryTworzeniaDokumentu)
+// factory method - this probe tests whether setting Oddzial/Stanowisko/Magazyn AT CREATION
+// TIME via that path succeeds where the post-creation patch failed.
+void ParametryTworzeniaTest(int oddzialId, int stanowiskoId)
+{
+    var (kontrahentId, symbol) = ResolveFixtures();
+    log.LogInformation("Fixtures: kontrahent={k}, symbol={s}, oddzial={o}, stanowisko={st}", kontrahentId, symbol, oddzialId, stanowiskoId);
+
+    var iDokumentyType = SferaReflection.RequireType("InsERT.Moria.Dokumenty.Logistyka.IDokumentySprzedazy, InsERT.Moria.Dokumenty.Logistyka");
+    var facade = session.Uchwyt.PodajObiektTypu(iDokumentyType);
+    var facadeType = facade.GetType();
+
+    // Discover whether the CONCRETE facade type actually exposes the generic
+    // Utworz(Konfiguracja, ParametryTworzeniaDokumentu) overload - the narrow
+    // IDokumentySprzedazy interface dump doesn't show it, but the concrete class may
+    // implement it via a base IObiektyBiznesoweDokumentow<T1,T2,T3> interface.
+    var utworzWithParams = facadeType.GetMethods(F)
+        .FirstOrDefault(m => m.Name == "Utworz"
+            && m.GetParameters().Length == 2
+            && m.GetParameters()[1].ParameterType.Name == "ParametryTworzeniaDokumentu");
+
+    if (utworzWithParams is null)
+    {
+        Console.WriteLine("RESULT: Utworz(Konfiguracja, ParametryTworzeniaDokumentu) NOT FOUND on facade - dumping all 'Utworz' overloads:");
+        foreach (var m in facadeType.GetMethods(F).Where(m => m.Name.StartsWith("Utworz")))
+            Console.WriteLine($"  {m.ReturnType.Name} {m.Name}({string.Join(", ", m.GetParameters().Select(p => p.ParameterType.Name + " " + p.Name))})");
+        return;
+    }
+    Console.WriteLine($"Found: {utworzWithParams.ReturnType.Name} Utworz({string.Join(", ", utworzWithParams.GetParameters().Select(p => p.ParameterType.Name))})");
+
+    // Get a valid Konfiguracja instance: create a throwaway plain FV first (never saved),
+    // read its Dane.Konfiguracja, then use that to call the parametrized Utworz.
+    var factoryPlain = iDokumentyType.GetMethod("UtworzFaktureSprzedazy", F)!;
+    var throwawayBo = factoryPlain.Invoke(facade, null)!;
+    var throwawayDane = throwawayBo.GetType().GetProperty("Dane", F)!.GetValue(throwawayBo)!;
+    var konfiguracja = acc.GetProperty(throwawayDane, throwawayDane.GetType(), "Konfiguracja")
+        ?? throw new InvalidOperationException("Dane.Konfiguracja is null on a fresh document - cannot resolve a Konfiguracja instance this way.");
+    Console.WriteLine($"Resolved Konfiguracja: {konfiguracja.GetType().FullName}");
+
+    // Build ParametryTworzeniaDokumentu { Oddzial, StanowiskoKasowe, Magazyn }.
+    var parametryType = utworzWithParams.GetParameters()[1].ParameterType;
+    var parametry = Activator.CreateInstance(parametryType)!;
+
+    // Resolve entities via the SAME proven FK-set + EF-fixup trick as ApplyExplicitCashRegister
+    // (the throwaway document already has a working DbContext) instead of a facade lookup -
+    // the IJednostkiOrganizacyjne facade under Kadry.Duze (HR module) is not DI-resolvable
+    // in this deployment (Unity container throws), so this sidesteps that entirely.
+    var throwawayDaneType = throwawayDane.GetType();
+    acc.SetProperty(throwawayDane, throwawayDaneType, "MiejsceWprowadzeniaId", oddzialId);
+    var oddzialEntity = acc.GetProperty(throwawayDane, throwawayDaneType, "MiejsceWprowadzenia");
+    if (oddzialEntity is null)
+    {
+        log.LogWarning("Could not resolve Oddzial {id} via the throwaway document's own MiejsceWprowadzenia FK-fixup; aborting.", oddzialId);
+        return;
+    }
+    acc.SetProperty(parametry, parametryType, "Oddzial", oddzialEntity);
+
+    acc.SetProperty(throwawayDane, throwawayDaneType, "StanowiskoKasoweId", stanowiskoId);
+    var stanowiskoEntity = acc.GetProperty(throwawayDane, throwawayDaneType, "StanowiskoKasowe");
+    if (stanowiskoEntity is not null)
+        acc.SetProperty(parametry, parametryType, "StanowiskoKasowe", stanowiskoEntity);
+    else
+        log.LogWarning("Could not resolve StanowiskoKasowe {id} via FK-fixup - leaving ParametryTworzeniaDokumentu.StanowiskoKasowe unset.", stanowiskoId);
+
+    // Call the parametrized factory.
+    object bo;
+    try
+    {
+        bo = utworzWithParams.Invoke(facade, new object?[] { konfiguracja, parametry })
+            ?? throw new InvalidOperationException("Utworz(Konfiguracja, ParametryTworzeniaDokumentu) returned null");
+    }
+    catch (TargetInvocationException tie)
+    {
+        Console.WriteLine($"RESULT: Utworz(...) THREW {tie.InnerException?.GetType().Name}: {tie.InnerException?.Message}");
+        return;
+    }
+    var boType = bo.GetType();
+    var dane = boType.GetProperty("Dane", F)!.GetValue(bo)!;
+    var daneType = dane.GetType();
+    Console.WriteLine($"Created via parametrized Utworz. Dane.MiejsceWprowadzenia = {(acc.GetProperty(dane, daneType, "MiejsceWprowadzenia") is { } mw ? acc.GetProperty(mw, mw.GetType(), "Id") : "NULL")}");
+
+    acc.SetBoolFlag(bo, boType, "IgnorujBlokade", true);
+    acc.SetBoolFlag(bo, boType, "WylaczBlokowanieStanowPrzezRezerwacjeIlosciowa", true);
+    acc.SetBoolFlag(bo, boType, "NieSprawdzajRealizacji", true);
+
+    boType.GetMethod("UstawNabywceWedlugId", F, new[] { typeof(int) })!.Invoke(bo, new object[] { kontrahentId });
+    acc.SetProperty(dane, daneType, "DataSprzedazy", DateTime.Now);
+    acc.SetProperty(dane, daneType, "DataWydaniaWystawienia", DateTime.Now);
+
+    var poz = boType.GetMethod("Dodaj", F, new[] { typeof(string) })!.Invoke(bo, new object[] { symbol })!;
+    acc.SetProperty(poz, poz.GetType(), "Ilosc", 1m);
+    var cena = poz.GetType().GetProperty("Cena", F)?.GetValue(poz);
+    if (cena is not null)
+    {
+        acc.SetProperty(cena, cena.GetType(), "BruttoPrzedRabatem", 1.23m);
+        acc.SetProperty(cena, cena.GetType(), "BruttoPoRabacie", 1.23m);
+        acc.SetProperty(poz, poz.GetType(), "CenaRecznieEdytowana", true);
+    }
+    acc.InvokeIfExists(bo, boType, "Przelicz");
+
+    ApplyPayment(bo, boType, dane, daneType, new PaymentPlan(Kind: "cash", FormaPlatnosciId: int.Parse(GetOpt("--fp", "1")), BankAccountId: null));
+
+    acc.InvokeIfExists(bo, boType, "IgnorujBlokadeRealizacjiPozycji");
+    acc.InvokeIfExists(bo, boType, "AutoSymbol");
+    acc.InvokeIfExists(bo, boType, "NadajNumer");
+
+    object? saved = null;
+    try { saved = boType.GetMethod("Zapisz", F, Type.EmptyTypes)!.Invoke(bo, null); }
+    catch (TargetInvocationException tie)
+    {
+        Console.WriteLine($"RESULT: Zapisz() THREW {tie.InnerException?.GetType().Name}: {tie.InnerException?.Message}");
+        return;
+    }
+
+    if (saved is true)
+    {
+        var id = (int)acc.GetProperty(dane, daneType, "Id")!;
+        Console.WriteLine($"RESULT: ACCEPTED - saved FV id={id} numer={acc.GetProperty(dane, daneType, "Symbol")} under oddzial={oddzialId} stanowisko={stanowiskoId} (via ParametryTworzeniaDokumentu)");
+    }
+    else
+    {
+        Console.WriteLine($"RESULT: REJECTED - Zapisz()={saved}. " +
+            acc.CollectValidationErrors(bo, boType, includeDocumentLevel: true, includeStateHint: true));
+    }
+}
+
+// Runtime discovery: dump session.Uchwyt's actual members for anything
+// Kontekst/Oddzial/Magazyn/Stanowisko-related - InsERT.Moria.IKontekstBiznesowy
+// (a session-level, ALL-GET-ONLY context carrying Oddzial/Magazyn/StanowiskoKasowe/Podmiot)
+// is not referenced anywhere else in the static reflection dump, so this checks whether
+// Uchwyt itself exposes it (or a way to switch it) at runtime.
+void UchwytContextDump()
+{
+    var uchwytType = session.Uchwyt.GetType();
+    Console.WriteLine($"Uchwyt runtime type: {uchwytType.FullName}");
+    foreach (var m in uchwytType.GetMembers(BindingFlags.Public | BindingFlags.Instance).OrderBy(x => x.Name))
+    {
+        var n = m.Name;
+        if (!(n.Contains("Kontekst", StringComparison.OrdinalIgnoreCase)
+              || n.Contains("Oddzial", StringComparison.OrdinalIgnoreCase)
+              || n.Contains("Magazyn", StringComparison.OrdinalIgnoreCase)
+              || n.Contains("Stanowisko", StringComparison.OrdinalIgnoreCase)))
+            continue;
+        var line = m switch
+        {
+            MethodInfo mi when !mi.IsSpecialName => $"  method {mi.ReturnType.Name} {mi.Name}({string.Join(", ", mi.GetParameters().Select(p => p.ParameterType.Name + " " + p.Name))})",
+            PropertyInfo pi => $"  prop {pi.PropertyType.Name} {pi.Name} {{ {(pi.CanRead ? "get; " : "")}{(pi.CanWrite ? "set; " : "")}}}",
+            _ => "",
+        };
+        if (line != "") Console.WriteLine(line);
+    }
+
+    // Also try resolving IKontekstBiznesowy directly via PodajObiektTypu, in case it's
+    // registered as a resolvable facade type in its own right (some session-scoped
+    // services are exposed this way rather than as a Uchwyt member).
+    try
+    {
+        var kbType = SferaReflection.RequireType("InsERT.Moria.IKontekstBiznesowy, InsERT.Moria.API");
+        var kb = session.Uchwyt.PodajObiektTypu(kbType);
+        Console.WriteLine($"\nResolved IKontekstBiznesowy via PodajObiektTypu: {kb.GetType().FullName}");
+        foreach (var p in kbType.GetProperties(BindingFlags.Public | BindingFlags.Instance))
+        {
+            object? val = null;
+            try { val = p.GetValue(kb); } catch (Exception ex) { val = $"(error: {ex.Message})"; }
+            Console.WriteLine($"  {p.Name} = {val}");
+        }
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"\nCould not resolve IKontekstBiznesowy via PodajObiektTypu: {ex.GetType().Name}: {ex.Message}");
     }
 }
 
