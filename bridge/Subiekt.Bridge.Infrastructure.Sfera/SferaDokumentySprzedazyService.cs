@@ -335,14 +335,8 @@ public sealed class SferaDokumentySprzedazyService
             throw new InvalidOperationException($"Nie udało się rozwiązać encji FormaPlatnosci {fpId} w kontekście dokumentu.");
 
         // 3. Add the payment row via IPlatnosciNaDokumencie (interface-typed lookup).
-        var iPlatnosci = SferaReflection.RequireType("InsERT.Moria.Dokumenty.Logistyka.IPlatnosciNaDokumencie, InsERT.Moria.API");
-        var fpEntityType = SferaReflection.RequireType("InsERT.Moria.ModelDanych.FormaPlatnosci, InsERT.Moria.ModelDanych");
         var addName = isCash ? "DodajPlatnoscNatychmiastowa" : "DodajPlatnoscOdroczona";
-        var add = iPlatnosci.GetMethods()
-            .FirstOrDefault(m => m.Name == addName
-                && m.GetParameters().Length == 1
-                && m.GetParameters()[0].ParameterType == fpEntityType)
-            ?? throw new InvalidOperationException($"{addName}(FormaPlatnosci) not found on IPlatnosciNaDokumencie");
+        var add = ResolveDodajPlatnoscMethod(addName);
         try
         {
             add.Invoke(bo, new[] { fp });
@@ -352,37 +346,72 @@ public sealed class SferaDokumentySprzedazyService
             throw new InvalidOperationException($"{addName} failed: " + tie.InnerException.Message);
         }
 
-        // 4. Re-assert the header's payment form (the add above may not set it).
-        _acc.SetProperty(dane, daneType, "FormaPlatnosci", fp);
-
-        // 5. Transfer: stamp the chosen seller account on the document snapshot.
-        if (!isCash)
+        // 4-5 run AFTER the payment row (step 3) has already been added to `bo`. Sfera's
+        // API exposes no "remove payment" call to roll that row back, so if either step
+        // below throws we cannot repair `bo` — we can only make sure it is never Zapisz()'d
+        // (Create() always mints a brand-new `bo` per call, so a caller-level retry starts
+        // from a clean business object) and that the failure is loud in the logs.
+        try
         {
-            var rbdProp = daneType.GetProperty("RachunkiBankowe", SferaObjectAccessor.Flags)
-                ?? throw new InvalidOperationException("Dane.RachunkiBankowe not found");
-            var rbd = rbdProp.GetValue(dane);
-            if (rbd is null)
+            // 4. Re-assert the header's payment form (the add above may not set it).
+            _acc.SetProperty(dane, daneType, "FormaPlatnosci", fp);
+
+            // 5. Transfer: stamp the chosen seller account on the document snapshot.
+            if (!isCash)
             {
-                var rbdType = SferaReflection.RequireType("InsERT.Moria.ModelDanych.RachunekBankowyDokumentu, InsERT.Moria.ModelDanych");
-                rbd = Activator.CreateInstance(rbdType)!;
-                if (rbdProp.CanWrite) rbdProp.SetValue(dane, rbd);
+                var rbdProp = daneType.GetProperty("RachunkiBankowe", SferaObjectAccessor.Flags)
+                    ?? throw new InvalidOperationException("Dane.RachunkiBankowe not found");
+                var rbd = rbdProp.GetValue(dane);
+                if (rbd is null)
+                {
+                    var rbdType = SferaReflection.RequireType("InsERT.Moria.ModelDanych.RachunekBankowyDokumentu, InsERT.Moria.ModelDanych");
+                    rbd = Activator.CreateInstance(rbdType)!;
+                    if (rbdProp.CanWrite) rbdProp.SetValue(dane, rbd);
+                }
+                var mfProp = rbd.GetType().GetProperty("RachunekBankowyMojejFirmy", SferaObjectAccessor.Flags)
+                    ?? throw new InvalidOperationException("RachunekBankowyDokumentu.RachunekBankowyMojejFirmy not found");
+                var snapshot = mfProp.GetValue(rbd);
+                if (snapshot is null)
+                {
+                    var snapType = SferaReflection.RequireType("InsERT.Moria.ModelDanych.DaneRachunkuBankowego, InsERT.Moria.ModelDanych");
+                    snapshot = Activator.CreateInstance(snapType)!;
+                    if (mfProp.CanWrite) mfProp.SetValue(rbd, snapshot);
+                }
+                _acc.SetProperty(snapshot, snapshot.GetType(), "Nazwa", accName);
+                _acc.SetProperty(snapshot, snapshot.GetType(), "Numer", accNumber);
             }
-            var mfProp = rbd.GetType().GetProperty("RachunekBankowyMojejFirmy", SferaObjectAccessor.Flags)
-                ?? throw new InvalidOperationException("RachunekBankowyDokumentu.RachunekBankowyMojejFirmy not found");
-            var snapshot = mfProp.GetValue(rbd);
-            if (snapshot is null)
-            {
-                var snapType = SferaReflection.RequireType("InsERT.Moria.ModelDanych.DaneRachunkuBankowego, InsERT.Moria.ModelDanych");
-                snapshot = Activator.CreateInstance(snapType)!;
-                if (mfProp.CanWrite) mfProp.SetValue(rbd, snapshot);
-            }
-            _acc.SetProperty(snapshot, snapshot.GetType(), "Nazwa", accName);
-            _acc.SetProperty(snapshot, snapshot.GetType(), "Numer", accNumber);
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex,
+                "Payment row was added to the document ({addName}) but the header/bank-account " +
+                "snapshot step failed afterward — this business object is left in a half-applied " +
+                "state and will be discarded WITHOUT calling Zapisz() (never persisted). The caller " +
+                "must retry the whole Create() call, which always fetches a fresh BO: {msg}",
+                addName, ex.Message);
+            throw;
         }
 
         _log.LogInformation("Explicit payment applied: {method} (forma '{forma}'{acct})",
             payment.Method, formName, isCash ? "" : $", rachunek {payment.BankAccountId}");
     }
+
+    // MethodInfo lookup for IPlatnosciNaDokumencie.DodajPlatnoscNatychmiastowa/DodajPlatnoscOdroczona
+    // is invariant per process (same interface, same overload shape) — cache it instead of
+    // re-running GetMethods()/LINQ on every invoice creation.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, MethodInfo> _dodajPlatnoscMethodCache = new();
+
+    private static MethodInfo ResolveDodajPlatnoscMethod(string addName)
+        => _dodajPlatnoscMethodCache.GetOrAdd(addName, static name =>
+        {
+            var iPlatnosci = SferaReflection.RequireType("InsERT.Moria.Dokumenty.Logistyka.IPlatnosciNaDokumencie, InsERT.Moria.API");
+            var fpEntityType = SferaReflection.RequireType("InsERT.Moria.ModelDanych.FormaPlatnosci, InsERT.Moria.ModelDanych");
+            return iPlatnosci.GetMethods()
+                .FirstOrDefault(m => m.Name == name
+                    && m.GetParameters().Length == 1
+                    && m.GetParameters()[0].ParameterType == fpEntityType)
+                ?? throw new InvalidOperationException($"{name}(FormaPlatnosci) not found on IPlatnosciNaDokumencie");
+        });
 
     // Map an OL taxRate string to the StawkiVat.Id (Guid). Behaviour identical to legacy.
     private Guid? LookupStawkaVatId(Microsoft.Data.SqlClient.SqlConnection conn, string? taxRate)

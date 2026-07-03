@@ -33,10 +33,25 @@ string GetOpt(string name, string fallback)
 }
 
 var command = argsList.FirstOrDefault(a => !a.StartsWith("--")) ?? "explore";
-var configPath = GetOpt("--config", @"C:\subiekt-poc\bridge\SferaApi\appsettings.json");
+
+// Throwaway Phase-0 tool, not part of bridge.sln's default build. The bundled default
+// only exists on the original dev machine — prefer --config, then the SFERA_BRIDGE_APPSETTINGS
+// env var (same override pattern as tools/SferaInspect's SFERA_BINARIES), and warn loudly
+// when silently falling back to the hardcoded path so a run on another machine fails fast
+// and obviously instead of a confusing "file not found" deep inside JsonDocument.Parse.
+const string DefaultConfigPath = @"C:\subiekt-poc\bridge\SferaApi\appsettings.json";
+var configPathFromEnv = Environment.GetEnvironmentVariable("SFERA_BRIDGE_APPSETTINGS");
+var configPath = GetOpt("--config", configPathFromEnv ?? DefaultConfigPath);
 
 using var loggerFactory = LoggerFactory.Create(b => b.AddSimpleConsole(o => o.SingleLine = true).SetMinimumLevel(argsList.Contains("--debug") ? LogLevel.Debug : LogLevel.Information));
 var log = loggerFactory.CreateLogger("Probe");
+
+if (!argsList.Contains("--config") && configPathFromEnv is null)
+{
+    log.LogWarning(
+        "No --config or SFERA_BRIDGE_APPSETTINGS set — defaulting to the original dev machine's " +
+        "path ({path}), which will not exist elsewhere.", DefaultConfigPath);
+}
 
 // ---- load Sfera options from the POC appsettings ----
 var json = JsonDocument.Parse(File.ReadAllText(configPath));

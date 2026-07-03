@@ -47,6 +47,10 @@ public static class BankAccountsEndpoints
             IDefaultBankAccountWriter writer,
             IAuditLog auditLog) =>
         {
+            // SetDefaultAsync never throws (it wraps everything, including
+            // BridgeException.Classify, into the Result), so gating the audit log on
+            // result.IsFailure below covers every outcome — there is no uncaught-exception
+            // path that would skip logging.
             var result = await writer.SetDefaultAsync(id);
             if (result.IsFailure)
             {
