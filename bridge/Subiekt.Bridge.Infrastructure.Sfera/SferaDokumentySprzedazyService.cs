@@ -304,13 +304,16 @@ public sealed class SferaDokumentySprzedazyService
                 ?? throw new ArgumentException("Płatność 'transfer' wymaga bankAccountId.");
             using var cmd = conn.CreateCommand();
             cmd.CommandText = @"
+                ;WITH SellerPodmioty AS (
+                    SELECT Id FROM ModelDanychContainer.Podmioty WHERE Typ = 2 AND Podtyp = 11
+                )
                 SELECT cgf.Nazwa, rb.Numer, w.Symbol, rb.Aktywny, rb.Wlasciciel_Id,
-                       (SELECT COUNT(*) FROM ModelDanychContainer.Podmioty WHERE Typ = 2 AND Podtyp = 11) AS SellerCount
+                       (SELECT COUNT(*) FROM SellerPodmioty) AS SellerCount
                 FROM ModelDanychContainer.CentraGromadzeniaFinansow_RachunekBankowy rb
                 JOIN ModelDanychContainer.CentraGromadzeniaFinansow cgf ON cgf.Id = rb.Id
                 LEFT JOIN ModelDanychContainer.Waluty w ON w.Id = rb.Waluta_Id
                 WHERE rb.Id = @id
-                  AND rb.Wlasciciel_Id IN (SELECT Id FROM ModelDanychContainer.Podmioty WHERE Typ = 2 AND Podtyp = 11)";
+                  AND rb.Wlasciciel_Id IN (SELECT Id FROM SellerPodmioty)";
             cmd.Parameters.AddWithValue("@id", accountId);
             using var reader = cmd.ExecuteReader();
             if (!reader.Read())
@@ -335,13 +338,13 @@ public sealed class SferaDokumentySprzedazyService
             // unknown that `BankAccountProbe podmioty` exists to answer, so a hard check
             // would risk false rejections on every install. Until the Oddzial/Platnik
             // selector lands (open work on issue #3), the CALLER must ensure
-            // bankAccountId belongs to the intended payer; on multi-payer installs we
-            // log loudly so a cross-payer stamp is auditable instead of silent. This
-            // fires on EVERY transfer issuance on such installs (even correct picks) -
-            // once the selector lands, key it off an owner-vs-payer mismatch (or
-            // downgrade to LogInformation) so well-behaved callers stop paying the noise.
+            // bankAccountId belongs to the intended payer; on multi-payer installs we log
+            // an informational audit trail so a cross-payer stamp is traceable instead of
+            // silent. This fires on EVERY transfer issuance on such installs, including
+            // correct picks, so it is LogInformation (not LogWarning) - it records expected
+            // behavior on multi-payer installs, not an error condition.
             if (sellerPodmiotCount > 1)
-                _log.LogWarning(
+                _log.LogInformation(
                     "Multi-payer install ({count} seller Podmioty): bank account {accountId} owned by Podmiot {ownerId} accepted WITHOUT validating it matches the document's payer (issue #3) - caller must ensure the account belongs to the intended payer",
                     sellerPodmiotCount, accountId, ownerPodmiotId);
         }
