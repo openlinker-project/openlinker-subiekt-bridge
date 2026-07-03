@@ -423,8 +423,8 @@ Response adds OL-shaped fields alongside the legacy ones:
 - **`pdfUrl`**: not exposed by Sfera in this POC → always `null` (documented).
 - **Currency**: only `PLN` is exercised in v1; other currencies are echoed but not specially handled.
 
-### `GET /api/bank-accounts` — seller bank accounts (issue #1)
-Lists the seller's (MojaFirma) ACTIVE bank accounts from Subiekt's "Rachunki bankowe" configuration, default account first. Read-only, served from the separate SQL connection (never contends with the Sfera write session).
+### `GET /api/bank-accounts` — seller bank accounts (issue #1, multi-Podmiot in issue #3)
+Lists ACTIVE bank accounts from Subiekt's "Rachunki bankowe" configuration across **every** seller (MojaFirma) Podmiot — an install may have more than one payer/branch, each with its own accounts (issue #3; previously only the first Podmiot's accounts were returned). Read-only, served from the separate SQL connection (never contends with the Sfera write session).
 
 ```json
 {
@@ -433,19 +433,24 @@ Lists the seller's (MojaFirma) ACTIVE bank accounts from Subiekt's "Rachunki ban
     "count": 2,
     "accounts": [
       { "id": 100004, "name": "Rachunek podstawowy", "number": "00 10101010 1111 1111 1111 1111",
-        "bankNumber": "", "description": "", "currency": "PLN", "isVatAccount": false, "isDefault": true },
+        "bankNumber": "", "description": "", "currency": "PLN", "isVatAccount": false, "isDefault": true,
+        "ownerPodmiotId": 1, "ownerName": "Moja Firma Sp. z o.o." },
       { "id": 100007, "name": "Rachunek on-line - testowy", "number": "38 2490 0005 7898 4745 0552 5035",
-        "bankNumber": "2490", "description": "", "currency": "PLN", "isVatAccount": false, "isDefault": false }
+        "bankNumber": "2490", "description": "", "currency": "PLN", "isVatAccount": false, "isDefault": false,
+        "ownerPodmiotId": 1, "ownerName": "Moja Firma Sp. z o.o." }
     ]
   }
 }
 ```
 
-- `isDefault` mirrors the Subiekt UI's "Podstawowy" column (the owner's primary-account back-reference), not the per-currency flag.
+- `isDefault` mirrors the Subiekt UI's "Podstawowy" column (the owner's primary-account back-reference), not the per-currency flag. It is per-owning-Podmiot, not global.
+- `ownerPodmiotId` / `ownerName` identify which seller Podmiot the account belongs to (issue #3) — use this to group accounts by payer/branch until an explicit selector exists on the invoice-issuance contract (tracked as open work on issue #3).
 - `id` is the value to pass as `bankAccountId` on `POST /api/invoices` and to `PUT /api/bank-accounts/{id}/default`.
+- **Ordering (issue #3)**: results are grouped by owner Podmiot first (`Wlasciciel_Id`), then by default-status within that owner (default account first), then by `id`. Callers that previously relied on "the default account is always first overall" on a single-Podmiot install should instead group by `ownerPodmiotId` — on multi-payer installs the response is no longer a flat "default-first" list.
+- **Known gap — no automated DB-backed test**: `SqlBankAccountsReader` and the multi-Podmiot enumeration logic have no automated SQL-Server-backed test in this repo (no test harness exists yet for the Sfera SQL reader layer). This was verified only via a live manual probe (`BankAccountProbe`) against a real Subiekt install, so correctness here is tracked debt rather than covered by CI.
 
 ### `PUT /api/bank-accounts/{id}/default` — set the seller default account (issue #1)
-Makes `{id}` the seller's default ("Podstawowy") account. Runs as a Podmiot business-object save on the Sfera write queue; the previous default clears automatically. Idempotent — selecting the current default succeeds without a write. Unknown / inactive / non-seller accounts return the `rejected` envelope (HTTP 422).
+Makes `{id}` the default ("Podstawowy") account **of the Podmiot that owns it** — each seller Podmiot keeps its own default, so on a multi-payer install this does not set one global default (issue #3). Runs as a Podmiot business-object save on the Sfera write queue; the owning Podmiot's previous default clears automatically. Idempotent — selecting the current default succeeds without a write. Unknown / inactive / non-seller accounts return the `rejected` envelope (HTTP 422).
 
 ```json
 { "success": true, "data": { "bankAccountId": 100007, "isDefault": true } }
@@ -471,7 +476,8 @@ STRICT semantics (any other combination is rejected, HTTP 422 `validation`):
 | any | any (on `documentType: "PA"`) | 422 — not supported for paragony |
 
 - Vocabulary errors (`paymentMethod` outside `cash`/`transfer`, non-positive `bankAccountId`) are 400 `bad_request` (shape validation).
-- The account must exist, be ACTIVE, belong to the seller and match the document currency — otherwise 422 `rejected`.
+- The account must exist, be ACTIVE, belong to **a** seller (MojaFirma) Podmiot and match the document currency — otherwise 422 `rejected`.
+- **Multi-payer caveat (issue #3)**: on installs with more than one seller Podmiot the bridge does NOT yet validate that the account's owning Podmiot matches the Podmiot the document is issued under — the caller must ensure `bankAccountId` belongs to the intended payer (pick from `GET /api/bank-accounts` by `ownerPodmiotId`). The bridge logs a warning on every such issuance until the Oddział/Płatnik selector lands (open work on issue #3).
 - The cash/transfer → `FormaPlatnosci` mapping is configurable: `Sfera:CashPaymentFormName` (default `gotówka`) and `Sfera:TransferPaymentFormName` (default `przelew`), matched case-insensitively among active payment forms.
 
 ### `POST /api/customers/upsert` — address & dedup

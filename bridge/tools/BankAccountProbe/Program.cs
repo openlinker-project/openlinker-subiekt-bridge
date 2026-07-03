@@ -12,6 +12,11 @@
 //   cash --fp N                 - create FV with DodajPlatnoscNatychmiastowa(FormaPlatnosci).
 //   default-flag --account N    - try flipping the seller default-account flag via a
 //                                 Sfera BO save (stretch-goal gate), then restore.
+//   podmioty                     - issue #3 live-topology probe: dump every seller
+//                                 (MojaFirma) Podmiot (Typ=2/Podtyp=11) plus its bank
+//                                 accounts, and look for an Oddzial/JednostkaOrganizacyjna
+//                                 schema, to decide multi-Podmiot vs. Podmiot-with-Oddzialy
+//                                 before designing the invoice-contract payer selector.
 //
 // Config: reads the "Sfera" section of the legacy POC appsettings
 // (default C:\subiekt-poc\bridge\SferaApi\appsettings.json, override with --config).
@@ -112,6 +117,7 @@ try
                 BankAccountId: null));
             break;
         case "default-flag": DefaultFlagProbe(int.Parse(GetOpt("--account", "100007"))); break;
+        case "podmioty": PodmiotyProbe(); break;
         default: log.LogError("Unknown command {c}", command); break;
     }
 }
@@ -709,4 +715,139 @@ object? FindByIdViaFacade(string facadeTypeName, Type entityType, int id)
     return znajdz.Invoke(facade, new object[] { lambda });
 }
 
+// Issue #3 live-topology probe: enumerate every seller (MojaFirma) Podmiot and its
+// bank accounts, then look for any Oddzial/JednostkaOrganizacyjna schema, so a future
+// session can decide "multiple genuinely-separate Podmioty" vs. "one Podmiot with
+// multiple Oddzialy" before designing the invoice-contract payer selector.
+void PodmiotyProbe()
+{
+    // Numeric SQL Server column widths (tinyint/smallint/int) vary across the schema in
+    // ways not worth hand-verifying per column (Typ/Podtyp turned out to be `tinyint` -
+    // System.Byte - not `int`, caught on the third live run 2026-07-02). Convert.ToInt32
+    // widens any integral SqlDbType without per-column guessing.
+    static int AnyInt(SqlDataReader r, int i) => Convert.ToInt32(r.GetValue(i));
+
+    using var conn = new SqlConnection(sqlConnString);
+    conn.Open();
+
+    // NOTE (issue #3/#5 Phase 1, verified live 2026-07-02 against Nexo_Demo_1): `Podmioty`
+    // has NO `Nazwa` column (128-column schema dump confirmed) - the display-name column
+    // is `NazwaSkrocona`. The original `owner.Nazwa` in this probe (and in PR #4's
+    // SqlBankAccountsReader) threw `Invalid column name 'Nazwa'` on first live run.
+    Console.WriteLine("\n===== Seller Podmioty (Typ=2 AND Podtyp=11) =====");
+    using (var c = conn.CreateCommand())
+    {
+        c.CommandText = @"SELECT Id, NazwaSkrocona, Typ, Podtyp FROM ModelDanychContainer.Podmioty
+                          WHERE Typ = 2 AND Podtyp = 11 ORDER BY Id";
+        using var r = c.ExecuteReader();
+        var count = 0;
+        while (r.Read())
+        {
+            count++;
+            // Typ/Podtyp are `tinyint` on the live schema, not `int` - AnyInt widens it.
+            Console.WriteLine($"  Podmiot Id={AnyInt(r, 0)} NazwaSkrocona={(r.IsDBNull(1) ? "NULL" : r.GetString(1))} Typ={AnyInt(r, 2)} Podtyp={AnyInt(r, 3)}");
+        }
+        Console.WriteLine(count == 1
+            ? "  -> exactly ONE seller Podmiot: today's TOP 1 assumption happened to hold on THIS database."
+            : $"  -> {count} seller Podmioty found: TOP 1 was silently dropping {count - 1} payer(s)' accounts.");
+    }
+
+    Console.WriteLine("\n===== Bank accounts per seller Podmiot =====");
+    using (var c = conn.CreateCommand())
+    {
+        c.CommandText = @"
+            SELECT rb.Wlasciciel_Id, owner.NazwaSkrocona, rb.Id, cgf.Nazwa, rb.Numer, rb.Aktywny
+            FROM ModelDanychContainer.CentraGromadzeniaFinansow_RachunekBankowy rb
+            JOIN ModelDanychContainer.CentraGromadzeniaFinansow cgf ON cgf.Id = rb.Id
+            LEFT JOIN ModelDanychContainer.Podmioty owner ON owner.Id = rb.Wlasciciel_Id
+            WHERE rb.Wlasciciel_Id IN (SELECT Id FROM ModelDanychContainer.Podmioty WHERE Typ = 2 AND Podtyp = 11)
+            ORDER BY rb.Wlasciciel_Id, rb.Id";
+        using var r = c.ExecuteReader();
+        while (r.Read())
+            Console.WriteLine($"  Owner={AnyInt(r, 0)} ({(r.IsDBNull(1) ? "NULL" : r.GetString(1))})  Account={AnyInt(r, 2)} {(r.IsDBNull(3) ? "" : r.GetString(3))} Numer={(r.IsDBNull(4) ? "" : r.GetString(4))} Aktywny={r.GetBoolean(5)}");
+    }
+
+    Console.WriteLine("\n===== Oddzial / JednostkaOrganizacyjna schema check =====");
+    using (var c = conn.CreateCommand())
+    {
+        c.CommandText = @"
+            SELECT TABLE_SCHEMA, TABLE_NAME FROM INFORMATION_SCHEMA.TABLES
+            WHERE TABLE_NAME LIKE '%Oddzial%' OR TABLE_NAME LIKE '%JednostkaOrganizacyjna%' OR TABLE_NAME LIKE '%StanowiskoKasowe%'
+            ORDER BY TABLE_NAME";
+        using var r = c.ExecuteReader();
+        var any = false;
+        while (r.Read())
+        {
+            any = true;
+            Console.WriteLine($"  table {r.GetString(0)}.{r.GetString(1)}");
+        }
+        if (!any)
+            Console.WriteLine("  -> no Oddzial/JednostkaOrganizacyjna-named table found (schema may model branches differently, e.g. via Podmiot.Rodzic/Nadrzedny - check IPodmioty facade members reflectively if this comes back empty).");
+    }
+
+    Console.WriteLine("\n===== Podmiot columns referencing a parent/branch relationship =====");
+    using (var c = conn.CreateCommand())
+    {
+        c.CommandText = @"
+            SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_SCHEMA = 'ModelDanychContainer' AND TABLE_NAME = 'Podmioty'
+              AND (COLUMN_NAME LIKE '%Oddzial%' OR COLUMN_NAME LIKE '%Nadrzedn%' OR COLUMN_NAME LIKE '%Rodzic%' OR COLUMN_NAME LIKE '%Platnik%')
+            ORDER BY COLUMN_NAME";
+        using var r = c.ExecuteReader();
+        var any = false;
+        while (r.Read()) { any = true; Console.WriteLine($"  Podmioty.{r.GetString(0)}"); }
+        if (!any)
+            Console.WriteLine("  -> none found on Podmioty directly.");
+    }
+
+    // Added issue #5 Phase 1 (verified live 2026-07-02 against Nexo_Demo_1): Oddzial is
+    // modeled as ModelDanychContainer.JednostkiOrganizacyjne_Oddzial (Id, Nazwa,
+    // Centrala_Id, PodstawowyRachunekBankowy_Id) - independent of Podmiot count (this
+    // demo DB has exactly 1 seller Podmiot but 2 Oddzialy, both pointing at the same
+    // Centrala_Id). An Oddzial can carry its OWN default bank account
+    // (PodstawowyRachunekBankowy_Id), separate from the Podmiot-level default.
+    Console.WriteLine("\n===== Oddzialy (JednostkiOrganizacyjne_Oddzial) =====");
+    using (var c = conn.CreateCommand())
+    {
+        c.CommandText = @"
+            SELECT Id, Nazwa, Centrala_Id, PodstawowyRachunekBankowy_Id
+            FROM ModelDanychContainer.JednostkiOrganizacyjne_Oddzial ORDER BY Id";
+        using var r = c.ExecuteReader();
+        var count = 0;
+        while (r.Read())
+        {
+            count++;
+            Console.WriteLine($"  Oddzial Id={AnyInt(r, 0)} Nazwa={(r.IsDBNull(1) ? "NULL" : r.GetString(1))} Centrala_Id={(r.IsDBNull(2) ? "NULL" : AnyInt(r, 2).ToString())} PodstawowyRachunekBankowy_Id={(r.IsDBNull(3) ? "NULL" : AnyInt(r, 3).ToString())}");
+        }
+        Console.WriteLine($"  -> {count} Oddzial(y) found.");
+    }
+
+    // Added issue #5 Phase 1: StanowiskoKasowe is a CentraGromadzeniaFinansow TPT subtype
+    // (same pattern as RachunekBankowy - display name lives on the base `cgf.Nazwa` row,
+    // not on the subtype table itself, which has no Nazwa either). The link table
+    // StanowiskoKasoweJednostkaOrganizacyjna confirms each Stanowisko Kasowe belongs to
+    // exactly one Oddzial (matches the `StanowiskoKasoweZInnejJednostkiOrganizacyjnejBlad`
+    // reflection-dump evidence from issue #5's body).
+    Console.WriteLine("\n===== Stanowiska Kasowe (CentraGromadzeniaFinansow_StanowiskoKasowe) =====");
+    using (var c = conn.CreateCommand())
+    {
+        c.CommandText = @"
+            SELECT sk.Id, cgf.Nazwa, sk.Symbol, sk.Opis, link.JednostkiOrganizacyjne_Id
+            FROM ModelDanychContainer.CentraGromadzeniaFinansow_StanowiskoKasowe sk
+            JOIN ModelDanychContainer.CentraGromadzeniaFinansow cgf ON cgf.Id = sk.Id
+            LEFT JOIN ModelDanychContainer.StanowiskoKasoweJednostkaOrganizacyjna link ON link.StanowiskaKasowe_Id = sk.Id
+            ORDER BY sk.Id";
+        using var r = c.ExecuteReader();
+        var count = 0;
+        while (r.Read())
+        {
+            count++;
+            Console.WriteLine($"  StanowiskoKasowe Id={AnyInt(r, 0)} Nazwa={(r.IsDBNull(1) ? "NULL" : r.GetString(1))} Symbol={(r.IsDBNull(2) ? "NULL" : r.GetString(2))} Opis={(r.IsDBNull(3) ? "" : r.GetString(3))} Oddzial_Id={(r.IsDBNull(4) ? "NULL (unlinked)" : AnyInt(r, 4).ToString())}");
+        }
+        Console.WriteLine($"  -> {count} Stanowisko(a) Kasowe found.");
+    }
+}
+
+// Type declarations must come AFTER all top-level statements (including local
+// functions) in a top-level-statements file - CS8803 otherwise.
 record PaymentPlan(string Kind, int FormaPlatnosciId, int? BankAccountId);
