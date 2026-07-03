@@ -107,6 +107,20 @@ public sealed class CreateInvoiceRequestValidator : AbstractValidator<CreateInvo
                 || string.Equals(t, "PA", StringComparison.OrdinalIgnoreCase))
             .WithMessage("DocumentType musi być 'FV' lub 'PA'.");
 
+        // Issue #1 payment fields: SHAPE only (vocabulary + positivity). The strict
+        // combination rules (transfer requires account, cash forbids it, account
+        // alone rejected, PA unsupported) are the Domain PaymentSelection /
+        // SalesDocument rules and surface as 422 via the build-failure path.
+        RuleFor(x => x.PaymentMethod)
+            .Must(m => string.IsNullOrWhiteSpace(m)
+                || string.Equals(m.Trim(), "cash", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(m.Trim(), "transfer", StringComparison.OrdinalIgnoreCase))
+            .WithMessage("PaymentMethod musi być 'cash' lub 'transfer'.");
+
+        RuleFor(x => x.BankAccountId)
+            .Must(id => !id.HasValue || id.Value > 0)
+            .WithMessage("BankAccountId musi być dodatnie.");
+
         // Either an explicit KontrahentId, or an inline buyer with a name, must be
         // present so the invoice has a payer.
         RuleFor(x => x)

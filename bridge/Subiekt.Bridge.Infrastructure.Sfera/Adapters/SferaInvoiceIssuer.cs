@@ -77,10 +77,20 @@ public sealed class SferaInvoiceIssuer : IInvoiceIssuer
                 Name: l.OneTimeName))
             .ToList();
 
+        // Explicit payment selection (issue #1) rides along; the service applies it
+        // in step 6b instead of the config-driven defaults.
+        var payment = document.Payment is { } p
+            ? new SferaPaymentInput(
+                Method: p.Method == PaymentMethod.Cash ? "cash" : "transfer",
+                BankAccountId: p.BankAccountId,
+                Currency: document.Currency)
+            : null;
+
         return new SferaInvoiceInput(
             KontrahentId: document.BuyerId,
             DataSprzedazy: fiscal.DataSprzedazy.LocalDateTime,
             DataWydania: fiscal.DataWydania.LocalDateTime,
-            Lines: lines);
+            Lines: lines,
+            Payment: payment);
     }
 }

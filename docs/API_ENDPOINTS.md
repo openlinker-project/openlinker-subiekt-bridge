@@ -423,6 +423,57 @@ Response adds OL-shaped fields alongside the legacy ones:
 - **`pdfUrl`**: not exposed by Sfera in this POC → always `null` (documented).
 - **Currency**: only `PLN` is exercised in v1; other currencies are echoed but not specially handled.
 
+### `GET /api/bank-accounts` — seller bank accounts (issue #1)
+Lists the seller's (MojaFirma) ACTIVE bank accounts from Subiekt's "Rachunki bankowe" configuration, default account first. Read-only, served from the separate SQL connection (never contends with the Sfera write session).
+
+```json
+{
+  "success": true,
+  "data": {
+    "count": 2,
+    "accounts": [
+      { "id": 100004, "name": "Rachunek podstawowy", "number": "00 10101010 1111 1111 1111 1111",
+        "bankNumber": "", "description": "", "currency": "PLN", "isVatAccount": false, "isDefault": true },
+      { "id": 100007, "name": "Rachunek on-line - testowy", "number": "38 2490 0005 7898 4745 0552 5035",
+        "bankNumber": "2490", "description": "", "currency": "PLN", "isVatAccount": false, "isDefault": false }
+    ]
+  }
+}
+```
+
+- `isDefault` mirrors the Subiekt UI's "Podstawowy" column (the owner's primary-account back-reference), not the per-currency flag.
+- `id` is the value to pass as `bankAccountId` on `POST /api/invoices` and to `PUT /api/bank-accounts/{id}/default`.
+
+### `PUT /api/bank-accounts/{id}/default` — set the seller default account (issue #1)
+Makes `{id}` the seller's default ("Podstawowy") account. Runs as a Podmiot business-object save on the Sfera write queue; the previous default clears automatically. Idempotent — selecting the current default succeeds without a write. Unknown / inactive / non-seller accounts return the `rejected` envelope (HTTP 422).
+
+```json
+{ "success": true, "data": { "bankAccountId": 100007, "isDefault": true } }
+```
+
+### Payment selection on `POST /api/invoices` (issue #1)
+Two ADDITIVE, optional fields select the payment explicitly; both absent keeps today's provider-default payments (no regression):
+
+```json
+{ "paymentMethod": "transfer", "bankAccountId": 100007 }
+```
+
+STRICT semantics (any other combination is rejected, HTTP 422 `validation`):
+
+| paymentMethod | bankAccountId | result |
+|---|---|---|
+| absent | absent | provider defaults (today's behavior) |
+| `"cash"` | absent | immediate payment via the configured cash form |
+| `"transfer"` | present | deferred payment via the configured transfer form + the chosen account stamped on the document (`RachunekBankowyMojejFirmy`) |
+| `"transfer"` | absent | 422 — transfer requires `bankAccountId` |
+| `"cash"` | present | 422 — cash must not carry an account |
+| absent | present | 422 — account requires explicit `"transfer"` |
+| any | any (on `documentType: "PA"`) | 422 — not supported for paragony |
+
+- Vocabulary errors (`paymentMethod` outside `cash`/`transfer`, non-positive `bankAccountId`) are 400 `bad_request` (shape validation).
+- The account must exist, be ACTIVE, belong to the seller and match the document currency — otherwise 422 `rejected`.
+- The cash/transfer → `FormaPlatnosci` mapping is configurable: `Sfera:CashPaymentFormName` (default `gotówka`) and `Sfera:TransferPaymentFormName` (default `przelew`), matched case-insensitively among active payment forms.
+
 ### `POST /api/customers/upsert` — address & dedup
 - Dedup by `nip`: a repeat upsert of an existing NIP returns the existing `id` (keep-existing policy; no overwrite — logged).
 - Optional structured `address` maps onto `AdresPodstawowy` (`ulica/nrDomu/nrLokalu/kodPocztowy/miejscowosc/poczta`).

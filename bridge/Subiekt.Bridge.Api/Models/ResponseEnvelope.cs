@@ -91,6 +91,16 @@ public class CreateInvoiceRequestDto
     // issueInvoice is self-sufficient (one call). Two-step (explicit KontrahentId)
     // still works and takes precedence.
     public BuyerDto? Buyer { get; set; }
+
+    // Issue #1: EXPLICIT payment selection (additive; optional). Strict semantics
+    // (enforced by the Domain PaymentSelection rule): "transfer" REQUIRES
+    // BankAccountId; "cash" must NOT carry one; BankAccountId alone is rejected;
+    // both absent = today's provider-default payments (no regression). Not
+    // supported for DocumentType "PA".
+    public string? PaymentMethod { get; set; }   // "cash" | "transfer"
+
+    // Subiekt bank-account id, as returned by GET /api/bank-accounts.
+    public int? BankAccountId { get; set; }
 }
 
 public class BuyerDto

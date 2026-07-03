@@ -55,6 +55,17 @@ public sealed class BridgeException : Exception
 
         var msg = e.Message;
 
+        // Business-rule rejections raised by our own Zapisz()==false paths always say
+        // "odrzuci..." (odrzucił/odrzuciła) or "... rejected ... save". Check this FIRST,
+        // before the connectivity heuristics below — a Sfera validation message can
+        // legitimately contain a connectivity-looking substring (e.g. "nie jest pod...")
+        // for an unrelated field, and that must never be misclassified as a transient 503.
+        if (msg.Contains("odrzuci", StringComparison.OrdinalIgnoreCase)
+            || msg.Contains("rejected", StringComparison.OrdinalIgnoreCase))
+        {
+            return Rejected(msg, e);
+        }
+
         if (e is Microsoft.Data.SqlClient.SqlException
             || e is System.Data.Common.DbException
             || e is TimeoutException

@@ -1,5 +1,6 @@
 using System.Reflection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace Subiekt.Bridge.Infrastructure.Sfera;
 
@@ -10,16 +11,24 @@ namespace Subiekt.Bridge.Infrastructure.Sfera;
 /// <see cref="SferaSession"/> (no Task.Run/lock — <see cref="SferaWriteQueue"/>
 /// serializes), uses the shared <see cref="SferaObjectAccessor"/> instead of the
 /// duplicated helpers, and takes <see cref="SferaInvoiceInput"/> instead of the Api DTO.
+/// <para>
+/// Issue #1 adds an EXPLICIT payment-selection path (step 6b): when
+/// <see cref="SferaPaymentInput"/> is present, the caller-chosen cash/transfer form
+/// and (for transfer) seller bank account replace the config-driven default calls.
+/// Mechanism verified live — see <c>docs/spikes/bank-account-probe-findings.md</c> s.3.
+/// </para>
 /// </summary>
 public sealed class SferaDokumentySprzedazyService
 {
     private readonly ILogger<SferaDokumentySprzedazyService> _log;
     private readonly SferaObjectAccessor _acc;
+    private readonly SferaOptions _opt;
 
-    public SferaDokumentySprzedazyService(ILogger<SferaDokumentySprzedazyService> log)
+    public SferaDokumentySprzedazyService(ILogger<SferaDokumentySprzedazyService> log, IOptions<SferaOptions> options)
     {
         _log = log;
         _acc = new SferaObjectAccessor(log);
+        _opt = options.Value;
     }
 
     public (int Id, string Numer) UtworzFaktura(SferaSession sfera, SferaInvoiceInput dto)
@@ -148,9 +157,17 @@ public sealed class SferaDokumentySprzedazyService
         // 6. Recompute netto/VAT split from the manual gross prices.
         _acc.InvokeIfExists(bo, boType, "Przelicz");
 
-        // 6b. Add the default payment (a faktura requires a FormaPlatnosci).
-        _acc.InvokeIfExists(bo, boType, "DodajPlatnosciDomyslne");
-        _acc.InvokeIfExists(bo, boType, "DodajDomyslnaPlatnoscNatychmiastowaNaKwoteDokumentu");
+        // 6b. Payments. An EXPLICIT selection (issue #1) replaces the config-driven
+        //     defaults; otherwise today's default calls fire verbatim (no regression).
+        if (dto.Payment is { } payment)
+        {
+            ApplyExplicitPayment(conn, bo, boType, dane, daneType, payment);
+        }
+        else
+        {
+            _acc.InvokeIfExists(bo, boType, "DodajPlatnosciDomyslne");
+            _acc.InvokeIfExists(bo, boType, "DodajDomyslnaPlatnoscNatychmiastowaNaKwoteDokumentu");
+        }
 
         // 6c. Allow the invoice out even when stock is insufficient.
         _acc.InvokeIfExists(bo, boType, "IgnorujBlokadeRealizacjiPozycji");
@@ -245,6 +262,156 @@ public sealed class SferaDokumentySprzedazyService
         _log.LogInformation("{factory} saved: id={id} numer={numer}", factoryMethod, id, numer);
         return (id, numer);
     }
+
+    // Apply an EXPLICIT payment selection (issue #1). Verified live mechanism
+    // (docs/spikes/bank-account-probe-findings.md s.3):
+    //   1. resolve the configured FormaPlatnosci row by name (SQL pre-check),
+    //   2. materialize the entity INSIDE the document's unit of work via FK fixup,
+    //   3. add the payment row through the IPlatnosciNaDokumencie interface
+    //      (explicitly implemented on the BO — lookup must go through the interface),
+    //   4. set Dane.FormaPlatnosci so the header carries the chosen form,
+    //   5. transfer only: write the seller-account snapshot on the document's
+    //      pre-attached RachunekBankowyDokumentu ({Nazwa, Numer} copy, not an FK).
+    // DodajPlatnosciDomyslne is deliberately NOT called here — it derives from
+    // configuration and ignores a pre-set Dane.FormaPlatnosci.
+    private void ApplyExplicitPayment(
+        Microsoft.Data.SqlClient.SqlConnection conn,
+        object bo, Type boType, object dane, Type daneType,
+        SferaPaymentInput payment)
+    {
+        var isCash = string.Equals(payment.Method, "cash", StringComparison.OrdinalIgnoreCase);
+        var formName = isCash ? _opt.CashPaymentFormName : _opt.TransferPaymentFormName;
+
+        // 1. Resolve the payment-form row (operator-configurable name, active only).
+        int fpId;
+        using (var cmd = conn.CreateCommand())
+        {
+            cmd.CommandText = @"SELECT TOP 1 Id FROM ModelDanychContainer.FormyPlatnosci
+                                WHERE LOWER(Nazwa) = LOWER(@n) AND Aktywna = 1";
+            cmd.Parameters.AddWithValue("@n", formName);
+            fpId = cmd.ExecuteScalar() is int id
+                ? id
+                : throw new ArgumentException(
+                    $"Forma płatności '{formName}' nie istnieje lub jest nieaktywna (konfiguracja Sfera:{(isCash ? "CashPaymentFormName" : "TransferPaymentFormName")}).");
+        }
+
+        // 1b. Transfer: pre-check the selected seller account (exists, seller-owned,
+        //     active, currency matches the document).
+        string? accName = null, accNumber = null;
+        if (!isCash)
+        {
+            var accountId = payment.BankAccountId
+                ?? throw new ArgumentException("Płatność 'transfer' wymaga bankAccountId.");
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+                SELECT cgf.Nazwa, rb.Numer, w.Symbol, rb.Aktywny
+                FROM ModelDanychContainer.CentraGromadzeniaFinansow_RachunekBankowy rb
+                JOIN ModelDanychContainer.CentraGromadzeniaFinansow cgf ON cgf.Id = rb.Id
+                LEFT JOIN ModelDanychContainer.Waluty w ON w.Id = rb.Waluta_Id
+                WHERE rb.Id = @id
+                  AND rb.Wlasciciel_Id = (SELECT TOP 1 Id FROM ModelDanychContainer.Podmioty WHERE Typ = 2 AND Podtyp = 11)";
+            cmd.Parameters.AddWithValue("@id", accountId);
+            using var reader = cmd.ExecuteReader();
+            if (!reader.Read())
+                throw new ArgumentException($"Rachunek bankowy {accountId} nie istnieje lub nie należy do sprzedawcy.");
+            accName = reader.IsDBNull(0) ? "" : reader.GetString(0);
+            accNumber = reader.IsDBNull(1) ? "" : reader.GetString(1);
+            var accCurrency = reader.IsDBNull(2) ? null : reader.GetString(2);
+            var active = reader.GetBoolean(3);
+            if (!active)
+                throw new ArgumentException($"Rachunek bankowy {accountId} jest nieaktywny.");
+            if (accCurrency is not null
+                && !string.Equals(accCurrency, payment.Currency, StringComparison.OrdinalIgnoreCase))
+                throw new ArgumentException(
+                    $"Rachunek bankowy {accountId} jest w walucie {accCurrency}, a dokument w {payment.Currency}.");
+        }
+
+        // 2. Materialize the FormaPlatnosci entity in the document's unit of work.
+        var fpIdProp = daneType.GetProperty("FormaPlatnosciId", SferaObjectAccessor.Flags)
+            ?? throw new InvalidOperationException("Dane.FormaPlatnosciId not found");
+        fpIdProp.SetValue(dane, fpId);
+        var fp = daneType.GetProperty("FormaPlatnosci", SferaObjectAccessor.Flags)?.GetValue(dane);
+        if (fp is null || !Equals(_acc.GetProperty(fp, fp.GetType(), "Id"), fpId))
+            throw new InvalidOperationException($"Nie udało się rozwiązać encji FormaPlatnosci {fpId} w kontekście dokumentu.");
+
+        // 3. Add the payment row via IPlatnosciNaDokumencie (interface-typed lookup).
+        var addName = isCash ? "DodajPlatnoscNatychmiastowa" : "DodajPlatnoscOdroczona";
+        var add = ResolveDodajPlatnoscMethod(addName);
+        try
+        {
+            add.Invoke(bo, new[] { fp });
+        }
+        catch (TargetInvocationException tie) when (tie.InnerException != null)
+        {
+            throw new InvalidOperationException($"{addName} failed: " + tie.InnerException.Message);
+        }
+
+        // 4-5 run AFTER the payment row (step 3) has already been added to `bo`. Sfera's
+        // API exposes no "remove payment" call to roll that row back, so if either step
+        // below throws we cannot repair `bo` — we can only make sure it is never Zapisz()'d
+        // (Create() always mints a brand-new `bo` per call, so a caller-level retry starts
+        // from a clean business object) and that the failure is loud in the logs.
+        try
+        {
+            // 4. Re-assert the header's payment form (the add above may not set it).
+            _acc.SetProperty(dane, daneType, "FormaPlatnosci", fp);
+
+            // 5. Transfer: stamp the chosen seller account on the document snapshot.
+            if (!isCash)
+            {
+                var rbdProp = daneType.GetProperty("RachunkiBankowe", SferaObjectAccessor.Flags)
+                    ?? throw new InvalidOperationException("Dane.RachunkiBankowe not found");
+                var rbd = rbdProp.GetValue(dane);
+                if (rbd is null)
+                {
+                    var rbdType = SferaReflection.RequireType("InsERT.Moria.ModelDanych.RachunekBankowyDokumentu, InsERT.Moria.ModelDanych");
+                    rbd = Activator.CreateInstance(rbdType)!;
+                    if (rbdProp.CanWrite) rbdProp.SetValue(dane, rbd);
+                }
+                var mfProp = rbd.GetType().GetProperty("RachunekBankowyMojejFirmy", SferaObjectAccessor.Flags)
+                    ?? throw new InvalidOperationException("RachunekBankowyDokumentu.RachunekBankowyMojejFirmy not found");
+                var snapshot = mfProp.GetValue(rbd);
+                if (snapshot is null)
+                {
+                    var snapType = SferaReflection.RequireType("InsERT.Moria.ModelDanych.DaneRachunkuBankowego, InsERT.Moria.ModelDanych");
+                    snapshot = Activator.CreateInstance(snapType)!;
+                    if (mfProp.CanWrite) mfProp.SetValue(rbd, snapshot);
+                }
+                _acc.SetProperty(snapshot, snapshot.GetType(), "Nazwa", accName);
+                _acc.SetProperty(snapshot, snapshot.GetType(), "Numer", accNumber);
+            }
+        }
+        catch (Exception ex)
+        {
+            _log.LogError(ex,
+                "Payment row was added to the document ({addName}) but the header/bank-account " +
+                "snapshot step failed afterward — this business object is left in a half-applied " +
+                "state and will be discarded WITHOUT calling Zapisz() (never persisted). The caller " +
+                "must retry the whole Create() call, which always fetches a fresh BO: {msg}",
+                addName, ex.Message);
+            throw;
+        }
+
+        _log.LogInformation("Explicit payment applied: {method} (forma '{forma}'{acct})",
+            payment.Method, formName, isCash ? "" : $", rachunek {payment.BankAccountId}");
+    }
+
+    // MethodInfo lookup for IPlatnosciNaDokumencie.DodajPlatnoscNatychmiastowa/DodajPlatnoscOdroczona
+    // is invariant per process (same interface, same overload shape) — cache it instead of
+    // re-running GetMethods()/LINQ on every invoice creation.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, MethodInfo> _dodajPlatnoscMethodCache = new();
+
+    private static MethodInfo ResolveDodajPlatnoscMethod(string addName)
+        => _dodajPlatnoscMethodCache.GetOrAdd(addName, static name =>
+        {
+            var iPlatnosci = SferaReflection.RequireType("InsERT.Moria.Dokumenty.Logistyka.IPlatnosciNaDokumencie, InsERT.Moria.API");
+            var fpEntityType = SferaReflection.RequireType("InsERT.Moria.ModelDanych.FormaPlatnosci, InsERT.Moria.ModelDanych");
+            return iPlatnosci.GetMethods()
+                .FirstOrDefault(m => m.Name == name
+                    && m.GetParameters().Length == 1
+                    && m.GetParameters()[0].ParameterType == fpEntityType)
+                ?? throw new InvalidOperationException($"{name}(FormaPlatnosci) not found on IPlatnosciNaDokumencie");
+        });
 
     // Map an OL taxRate string to the StawkiVat.Id (Guid). Behaviour identical to legacy.
     private Guid? LookupStawkaVatId(Microsoft.Data.SqlClient.SqlConnection conn, string? taxRate)

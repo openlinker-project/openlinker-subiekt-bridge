@@ -74,7 +74,13 @@ public static class InvoiceContractMapper
 
         var issueDate = new DateTimeOffset(req.IssueDate ?? DateTime.Now);
 
-        var docResult = SalesDocument.Create(documentType, buyerId, currency, issueDate, lines);
+        // Issue #1: explicit payment selection — strict combination rules live in
+        // the Domain value object; a failure surfaces as the standard 422 build path.
+        var paymentResult = PaymentSelection.TryCreate(req.PaymentMethod, req.BankAccountId);
+        if (paymentResult.IsFailure)
+            return Result.Failure<(SalesDocument, InlineBuyer?)>(paymentResult.Error);
+
+        var docResult = SalesDocument.Create(documentType, buyerId, currency, issueDate, lines, paymentResult.Value);
         if (docResult.IsFailure)
             return Result.Failure<(SalesDocument, InlineBuyer?)>(docResult.Error);
 
