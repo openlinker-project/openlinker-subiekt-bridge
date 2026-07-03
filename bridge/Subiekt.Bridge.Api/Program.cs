@@ -376,6 +376,7 @@ app.MapStockEndpoints();
 app.MapInvoicesEndpoints();
 app.MapBankAccountsEndpoints();
 app.MapBranchesEndpoints();
+app.MapCashRegistersEndpoints();
 app.MapAuditEndpoints();
 
 // Diagnostics introspection endpoints register ONLY when Diagnostics:Enabled AND

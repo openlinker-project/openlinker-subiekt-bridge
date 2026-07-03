@@ -290,7 +290,8 @@ public sealed class SferaDokumentySprzedazyService
     {
         _acc.SetProperty(dane, daneType, "StanowiskoKasoweId", stanowiskoKasoweId);
         var resolvedStanowisko = _acc.GetProperty(dane, daneType, "StanowiskoKasowe");
-        if (resolvedStanowisko is null)
+        if (resolvedStanowisko is null
+            || !Equals(_acc.GetProperty(resolvedStanowisko, resolvedStanowisko.GetType(), "Id"), stanowiskoKasoweId))
             throw new InvalidOperationException($"Nie udało się rozwiązać stanowiska kasowego {stanowiskoKasoweId} w kontekście dokumentu.");
 
         _log.LogInformation("Explicit cash-register applied: stanowisko={stanowisko}", stanowiskoKasoweId);
