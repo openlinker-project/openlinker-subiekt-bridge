@@ -35,8 +35,13 @@ public static class ProductsEndpoints
     private static readonly string ConnStr = BridgeConfig.ConnectionString;
 
     private static IResult Ok<T>(T data) => Results.Ok(new { success = true, data, error = (object?)null });
-    private static IResult Fail(string error, int status = 422) =>
-        Results.Json(new { success = false, data = (object?)null, error }, statusCode: status);
+    // #11-review fix: this used to emit a bare STRING `error`, the same
+    // envelope mismatch flagged for FiscalizationEndpoints.cs - every other
+    // /api/* file (OrdersEndpoints/InventoryEndpoints/Invoicing via
+    // Program.cs) sends {code,reason,correlationId,failureMode} and
+    // SubiektBridgeHttpClient (TS) reads `error.reason`.
+    private static IResult Fail(string code, string reason, int status = 422, string failureMode = "rejected") =>
+        Results.Json(new { success = false, data = (object?)null, error = new { code, reason, correlationId = (string?)null, failureMode } }, statusCode: status);
 
     public static void MapProductsEndpoints(this WebApplication app)
     {
@@ -49,7 +54,7 @@ public static class ProductsEndpoints
         app.MapGet("/api/products/search", async (string? q, int? limit) =>
         {
             if (string.IsNullOrWhiteSpace(q))
-                return Fail("q is required", 400);
+                return Fail("bad_request", "q is required", 400);
             var products = await SearchProducts(q, limit ?? 25);
             return Ok(new { products });
         });
@@ -67,25 +72,29 @@ public static class ProductsEndpoints
         app.MapGet("/api/products/{symbol}", async (string symbol) =>
         {
             var product = await ReadProduct(symbol);
-            return product is null ? Fail($"No product with symbol {symbol}.", 404) : Ok(product);
+            return product is null ? Fail("not_found", $"No product with symbol {symbol}.", 404) : Ok(product);
         });
 
         app.MapPost("/api/products", async (HttpRequest req) =>
         {
             CreateProductRequest? body;
             try { body = await req.ReadFromJsonAsync<CreateProductRequest>(); }
-            catch (Exception e) { return Fail($"bad request: {e.Message}", 400); }
+            catch (Exception e) { return Fail("bad_request", $"bad request: {e.Message}", 400); }
             if (body is null || string.IsNullOrWhiteSpace(body.Symbol) || string.IsNullOrWhiteSpace(body.Nazwa))
-                return Fail("symbol and nazwa are required", 400);
+                return Fail("bad_request", "symbol and nazwa are required", 400);
 
             try
             {
                 var product = await CreateProduct(body);
                 return Ok(product);
             }
+            catch (TimeoutException e)
+            {
+                return Fail("sfera_error", e.Message, failureMode: "in-doubt");
+            }
             catch (Exception e)
             {
-                return Fail(e.Message);
+                return Fail("sfera_error", e.Message);
             }
         });
 
@@ -93,17 +102,21 @@ public static class ProductsEndpoints
         {
             UpdateProductRequest? body;
             try { body = await req.ReadFromJsonAsync<UpdateProductRequest>(); }
-            catch (Exception e) { return Fail($"bad request: {e.Message}", 400); }
-            if (body is null) return Fail("body is required", 400);
+            catch (Exception e) { return Fail("bad_request", $"bad request: {e.Message}", 400); }
+            if (body is null) return Fail("bad_request", "body is required", 400);
 
             try
             {
                 var product = await UpdateProduct(symbol, body);
-                return product is null ? Fail($"No product with symbol {symbol}.", 404) : Ok(product);
+                return product is null ? Fail("not_found", $"No product with symbol {symbol}.", 404) : Ok(product);
+            }
+            catch (TimeoutException e)
+            {
+                return Fail("sfera_error", e.Message, failureMode: "in-doubt");
             }
             catch (Exception e)
             {
-                return Fail(e.Message);
+                return Fail("sfera_error", e.Message);
             }
         });
     }
@@ -317,8 +330,19 @@ public static class ProductsEndpoints
     /// gross-price setter and auto-recalculates net/profit/margin/markup - it
     /// is used here instead. Finds the level by `.Id == 0` rather than assuming
     /// collection index 1 is level 0 (1-indexed COM collection, Id is a
-    /// separate field from position).</summary>
-    private static void SetGrossPriceLevel0(dynamic tw, decimal grossPrice)
+    /// separate field from position).
+    ///
+    /// #3-review fix: TwCena carries no VAT-rate attribute of its own
+    /// (TwCenaMembers.htm), so `.Netto` cannot be derived from the price
+    /// object alone - this used to always divide by 1.23, mispricing every
+    /// SKU not taxed at the standard 23% rate (food, books, medical, exports
+    /// are all routine in PL retail). `vatRatePercent` is now the towar's
+    /// REAL rate, resolved by the caller from `tw_IdVatSp -> sl_StawkaVAT`
+    /// (see ResolveVatRateForSymbolAsync) - only when the caller genuinely
+    /// cannot know it yet (a brand-new towar, whose classification this
+    /// bridge cannot read before it exists) does this fall back to 23%, and
+    /// it says so loudly rather than silently.</summary>
+    private static void SetGrossPriceLevel0(dynamic tw, decimal grossPrice, decimal? vatRatePercent = null)
     {
         dynamic ceny = tw.Ceny;
         int count = ceny.Liczba;
@@ -337,14 +361,29 @@ public static class ProductsEndpoints
         // carrying a valid 23% VAT id - root cause unconfirmed. TwCena.Stala
         // ("this price level is NOT recalculated on a cena-kartotekowa change")
         // is a plausible culprit if it defaults true on a freshly created
-        // towar's level-0 row - cleared defensively before writing. TwCena
-        // carries no VAT-rate attribute of its own (TwCenaMembers.htm), so the
-        // net figure is computed with the standard PL 23% rate rather than a
-        // per-towar lookup - acceptable for MVP, revisit if non-standard-rate
-        // products need this endpoint.
+        // towar's level-0 row - cleared defensively before writing.
         try { target.Stala = false; } catch { }
         target.Brutto = grossPrice;
-        try { target.Netto = Math.Round(grossPrice / 1.23m, 2); } catch { }
+        if (vatRatePercent is null)
+            Console.Error.WriteLine("ProductsEndpoints.SetGrossPriceLevel0: could not resolve the towar's real VAT rate - assuming 23% for the net-price calculation. The towar's real rate will be reported correctly on the next ReadProduct once Subiekt has classified it; re-sync the price then.");
+        var divisor = 1m + (vatRatePercent ?? 23m) / 100m;
+        try { target.Netto = Math.Round(grossPrice / divisor, 2); } catch { }
+    }
+
+    /// <summary>The towar's CURRENT real VAT rate (sl_StawkaVAT.vat_Stawka via
+    /// tw_IdVatSp), or null when the towar carries none / does not exist yet.
+    /// #3-review fix companion - see SetGrossPriceLevel0.</summary>
+    private static async Task<decimal?> ResolveVatRateForSymbolAsync(string symbol)
+    {
+        await using var c = new SqlConnection(ConnStr);
+        await c.OpenAsync();
+        await using var cmd = new SqlCommand(
+            @"SELECT v.vat_Stawka FROM tw__Towar t
+              LEFT JOIN sl_StawkaVAT v ON v.vat_Id = t.tw_IdVatSp
+              WHERE t.tw_Symbol = @sym", c);
+        cmd.Parameters.AddWithValue("@sym", symbol);
+        var r = await cmd.ExecuteScalarAsync();
+        return r is null || r is DBNull ? null : Convert.ToDecimal(r);
     }
 
     // --- Sfera writes -------------------------------------------------------
@@ -362,10 +401,6 @@ public static class ProductsEndpoints
                 if (!string.IsNullOrEmpty(req.Opis)) tw.Opis = req.Opis;
                 if (req.JednostkaMiary is { Length: > 0 } jm) { try { tw.JednostkaMiary = jm; } catch { } }
                 if (req.Waga is decimal waga) { try { tw.Masa = waga; } catch { } }
-                if (req.CenaSprzedazyBrutto is decimal cena)
-                {
-                    SetGrossPriceLevel0(tw, cena);
-                }
                 tw.Zapisz();
                 if (req.KodKreskowy is { Length: > 0 } ean)
                 {
@@ -382,11 +417,28 @@ public static class ProductsEndpoints
             finally { try { tw.Zamknij(); } catch { } }
         }, TimeSpan.FromSeconds(60));
 
+        // #3-review fix: price is set as a SEPARATE step, through the same
+        // WczytajTowar/mutate/Zapisz sequence UpdateProduct already uses -
+        // rather than mutating the price sub-object on the still-open
+        // create-Towar and Zapisz()-ing it a second time, an untested COM
+        // sequence. This also means the net price is derived from the
+        // towar's REAL VAT rate, whatever Subiekt just assigned it on
+        // creation, rather than an assumed 23% - see SetGrossPriceLevel0.
+        if (req.CenaSprzedazyBrutto is decimal cena)
+            await UpdateProduct(req.Symbol, new UpdateProductRequest { CenaSprzedazyBrutto = cena });
+
         return (await ReadProduct(req.Symbol))!;
     }
 
     private static async Task<BridgeProductDto?> UpdateProduct(string symbol, UpdateProductRequest req)
     {
+        // #3-review fix: resolved BEFORE the Sfera call - the towar already
+        // exists here, so its real VAT rate is knowable in advance (unlike on
+        // CreateProduct's first Zapisz, where the towar does not exist yet).
+        var vatRatePercent = req.CenaSprzedazyBrutto is decimal
+            ? await ResolveVatRateForSymbolAsync(symbol)
+            : null;
+
         bool found = true;
         Sfera.Run(sub =>
         {
@@ -398,7 +450,7 @@ public static class ProductsEndpoints
                 if (req.Nazwa is { Length: > 0 } nazwa) tw.Nazwa = nazwa;
                 if (!string.IsNullOrEmpty(req.Opis)) tw.Opis = req.Opis;
                 if (req.Waga is decimal waga) { try { tw.Masa = waga; } catch { } }
-                if (req.CenaSprzedazyBrutto is decimal cena) SetGrossPriceLevel0(tw, cena);
+                if (req.CenaSprzedazyBrutto is decimal cena) SetGrossPriceLevel0(tw, cena, vatRatePercent);
                 tw.Zapisz();
             }
             finally { try { tw.Zamknij(); } catch { } }

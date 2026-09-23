@@ -6,8 +6,23 @@
 
 using System.Data;
 using System.Globalization;
+using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Data.SqlClient;
+
+// #minor-review fix: plain `==` on a secret is a timing side-channel (each
+// mismatching byte position can, in principle, shave a little off response
+// time). Low real-world risk on a bridge reachable only on a local network,
+// but the fix is a one-line, zero-risk swap - CryptographicOperations
+// compares two equal-length UTF8 byte spans in constant time; a length
+// mismatch itself leaks nothing beyond "wrong", which a normal 401 already
+// does for any auth check.
+static bool ConstantTimeEquals(string a, string b)
+{
+    var ab = Encoding.UTF8.GetBytes(a);
+    var bb = Encoding.UTF8.GetBytes(b);
+    return ab.Length == bb.Length && CryptographicOperations.FixedTimeEquals(ab, bb);
+}
 
 // Deployment configuration - see BridgeConfig.cs. These were `const` literals
 // compiled into the binary (and BridgeConfig.ConnectionString was a `const` in six separate files),
@@ -49,6 +64,28 @@ var app = builder.Build();
 // "read and overridden". Secrets are deliberately NOT echoed.
 app.Logger.LogInformation("{Config}", BridgeConfig.Describe());
 
+// #12-review fix: the sibling `bridge/` (nexo) refuses to boot on a
+// non-loopback bind with no TLS configured. This bridge cannot do the same
+// unconditionally - the plain-HTTP port MUST be non-loopback so OpenLinker
+// and marketplaces can fetch /gt-image bytes (see BridgeConfig.HttpPort's
+// own docblock) - but that legitimate need does not make it fine for the
+// SAME non-loopback bind to also carry the fiscal/invoicing/order /api/*
+// routes in plaintext with only a bearer token guarding them. Surfaced as a
+// loud, explicit startup warning rather than silently accepted: an operator
+// running this without a certificate configured is told so, and told what
+// to do about it (BridgeConfig.CertificatePath, or restrict network access
+// to this host at the firewall).
+if (!BridgeConfig.HttpsConfigured)
+{
+    app.Logger.LogWarning(
+        "SECURITY: no HTTPS certificate is configured (BridgeConfig.CertificatePath). " +
+        "Every /api/* route (invoicing, orders, inventory, fiscalization) is being served " +
+        "in PLAINTEXT on a non-loopback bind (:{Port}), guarded only by the bearer token. " +
+        "Configure CertificatePath/CertificatePassword, or restrict network access to this " +
+        "host at the firewall - do not expose this port to an untrusted network as-is.",
+        BridgeConfig.HttpPort);
+}
+
 // Warm Subiekt up now, not on the first order - a cold attach can take well
 // over a minute, past OpenLinker's own HTTP timeout on the sync call.
 Sfera.Warmup();
@@ -82,7 +119,7 @@ app.Use(async (ctx, next) =>
         {
             var raw = Encoding.UTF8.GetString(Convert.FromBase64String(h[6..].Trim()));
             var i = raw.IndexOf(':');
-            if (i > 0 && raw[..i] == User && raw[(i + 1)..] == Pass) { await next(); return; }
+            if (i > 0 && ConstantTimeEquals(raw[..i], User) && ConstantTimeEquals(raw[(i + 1)..], Pass)) { await next(); return; }
         }
     }
     ctx.Response.StatusCode = 401;
@@ -103,7 +140,7 @@ app.Use(async (ctx, next) =>
     // comparison is "" == "", which every request with no header satisfies -
     // so an unconfigured bridge would accept everything. Unset means closed.
     var ok = BridgeConfig.TokenAuthConfigured
-             && (bearer == $"Bearer {InvoiceToken}" || xToken == InvoiceToken);
+             && (ConstantTimeEquals(bearer, $"Bearer {InvoiceToken}") || ConstantTimeEquals(xToken, InvoiceToken));
     if (!ok)
     {
         ctx.Response.StatusCode = 401;
@@ -343,6 +380,14 @@ app.MapGet("/wp-json/wc/v3/products/{pid:int}/variations/{vid:int}", async (int 
 // --- ZAMOWIENIA: dokumenty ZK z Subiekta jako zamowienia WooCommerce ----------
 // GT nie ma znacznika modyfikacji dokumentu, wiec date_modified jest syntetyczna:
 // data wystawienia + numer dokumentu w sekundach. Monotoniczna, co wystarcza kursorowi.
+// #6-review fix: this used to filter `d.dok_Typ = 16`, an UNCONFIRMED numeric
+// code that OrdersEndpoints.cs's own file header and Invoicing.cs both
+// explicitly say was never established live - both of those instead filter
+// `dok_NrPelny LIKE 'ZK %'`, which IS confirmed live (#753's invoicing E2E
+// run). Two different filters for "is this a ZK" inside the SAME diff meant
+// the WC-shim order routes could silently match the wrong rows (or none) on
+// a real install where 16 turns out not to be ZK's code. Aligned to the
+// confirmed-live filter rather than the unconfirmed one.
 const string OrderSelect = @"
 SELECT  d.dok_Id, d.dok_NrPelny, d.dok_DataWyst, d.dok_WartBrutto, d.dok_Status,
         k.kh_Id, k.kh_Symbol, k.kh_EMail,
@@ -350,7 +395,7 @@ SELECT  d.dok_Id, d.dok_NrPelny, d.dok_DataWyst, d.dok_WartBrutto, d.dok_Status,
 FROM    dok__Dokument d
 LEFT JOIN kh__Kontrahent k ON k.kh_Id = d.dok_PlatnikId
 OUTER APPLY (SELECT TOP 1 * FROM adr__Ewid WHERE adr_IdObiektu = k.kh_Id AND adr_TypAdresu = 1) a
-WHERE   d.dok_Typ = 16
+WHERE   d.dok_NrPelny LIKE 'ZK %'
 ";
 
 static string Iso(DateTime d, int id) => d.Date.AddSeconds(id).ToString("yyyy-MM-ddTHH:mm:ss");
@@ -920,7 +965,12 @@ app.MapPost("/wp-json/wc/v3/orders", async (HttpRequest req) =>
 // infrastructure/http/subiekt-bridge-http.client.ts}. See Invoicing.cs for the
 // Sfera-side implementation and its gta.chm citations.
 
-app.MapGet("/health", () => Results.Ok(new { success = true, data = new { ok = true }, error = (object?)null }));
+// #10-review fix: `sferaRecycleCount` surfaces Sfera.RecycleCount here rather
+// than leaving it log-only - a steadily climbing number across health polls
+// is the operator-visible signal that the worker thread + session leak
+// (RecycleWorker's own docblock) is happening, before it becomes a resource
+// problem nobody was watching for.
+app.MapGet("/health", () => Results.Ok(new { success = true, data = new { ok = true, sferaRecycleCount = Sfera.RecycleCount }, error = (object?)null }));
 
 static IResult Envelope<T>(T data) => Results.Ok(new { success = true, data, error = (object?)null });
 static IResult Rejected(string code, string reason, int status = 422) =>
@@ -984,7 +1034,11 @@ app.MapPost("/api/invoices", async (HttpRequest req) =>
                 TowarSymbol = LStr("towarSymbol") is var ts && ts != "" ? ts : null,
                 Ilosc = LDec("ilosc"),
                 CenaBrutto = LDec("cenaBrutto"),
-                StawkaVAT = LStr("stawkaVAT") is var sv && sv != "" ? sv : "23",
+                // #2-review fix: was `sv != "" ? sv : "23"` - a silent 23%
+                // default for an omitted rate. Passed through as-is (null when
+                // absent) so Invoicing.IssueInvoice's explicit-presence check
+                // actually fires instead of never seeing a missing rate.
+                StawkaVAT = LStr("stawkaVAT") is var sv && sv != "" ? sv : null,
                 Name = LStr("name") is var nm && nm != "" ? nm : null,
             });
         }
@@ -1013,10 +1067,18 @@ app.MapPost("/api/invoices", async (HttpRequest req) =>
         });
     }
     catch (InvoiceValidationException e) { return Rejected("validation_error", e.Message, 400); }
+    catch (TimeoutException e)
+    {
+        // Sfera.Run's own doc: the COM-side wait outlives the HTTP request,
+        // so this does NOT mean the invoice was not created - it means we
+        // do not know. Never "rejected" (never safe to blindly retry).
+        app.Logger.LogError("IssueInvoice timed out: {Msg}", e.Message);
+        return Results.Json(new { success = false, data = (object?)null, error = new { code = "sfera_error", reason = e.Message, correlationId = (string?)null, failureMode = "in-doubt" } }, statusCode: 500);
+    }
     catch (Exception e)
     {
         app.Logger.LogError("IssueInvoice failed: {Msg}", e.Message);
-        return Results.Json(new { success = false, data = (object?)null, error = new { code = "sfera_error", reason = e.Message, correlationId = (string?)null } }, statusCode: 500);
+        return Results.Json(new { success = false, data = (object?)null, error = new { code = "sfera_error", reason = e.Message, correlationId = (string?)null, failureMode = "rejected" } }, statusCode: 500);
     }
 });
 
@@ -1063,13 +1125,26 @@ app.MapPost("/api/invoices/{origId:int}/corrections", async (int origId, HttpReq
             korygowanyId = result.KorygowanyId,
             przyczyna = result.Przyczyna,
             state = result.State,
+            // #4-review fix: this bridge has no confirmed-live way to reverse
+            // a warehouse movement for a korekta, so a quantity-reducing line
+            // is reported here rather than silently having no stock effect -
+            // `stockAutoReleased: false` with a non-empty `quantityDeltas`
+            // means the caller should adjust stock itself (POST
+            // /api/inventory/adjust) for the reported delta per line.
+            quantityDeltas = result.QuantityDeltas?.Select(d => new { lp = d.Lp, delta = d.Delta }),
+            stockAutoReleased = result.StockAutoReleased,
         });
     }
     catch (InvoiceValidationException e) { return Rejected("validation_error", e.Message, 400); }
+    catch (TimeoutException e)
+    {
+        app.Logger.LogError("IssueCorrection timed out: {Msg}", e.Message);
+        return Results.Json(new { success = false, data = (object?)null, error = new { code = "sfera_error", reason = e.Message, correlationId = (string?)null, failureMode = "in-doubt" } }, statusCode: 500);
+    }
     catch (Exception e)
     {
         app.Logger.LogError("IssueCorrection failed: {Msg}", e.Message);
-        return Results.Json(new { success = false, data = (object?)null, error = new { code = "sfera_error", reason = e.Message, correlationId = (string?)null } }, statusCode: 500);
+        return Results.Json(new { success = false, data = (object?)null, error = new { code = "sfera_error", reason = e.Message, correlationId = (string?)null, failureMode = "rejected" } }, statusCode: 500);
     }
 });
 
@@ -1099,10 +1174,15 @@ app.MapPost("/api/customers/upsert", async (HttpRequest req) =>
         var id = await Invoicing.UpsertCustomer(custReq);
         return Envelope(new { id, numer = "", nazwaSkrocona = custReq.NazwaSkrocona, nip = custReq.Nip });
     }
+    catch (TimeoutException e)
+    {
+        app.Logger.LogError("UpsertCustomer timed out: {Msg}", e.Message);
+        return Results.Json(new { success = false, data = (object?)null, error = new { code = "sfera_error", reason = e.Message, correlationId = (string?)null, failureMode = "in-doubt" } }, statusCode: 500);
+    }
     catch (Exception e)
     {
         app.Logger.LogError("UpsertCustomer failed: {Msg}", e.Message);
-        return Results.Json(new { success = false, data = (object?)null, error = new { code = "sfera_error", reason = e.Message, correlationId = (string?)null } }, statusCode: 500);
+        return Results.Json(new { success = false, data = (object?)null, error = new { code = "sfera_error", reason = e.Message, correlationId = (string?)null, failureMode = "rejected" } }, statusCode: 500);
     }
 });
 

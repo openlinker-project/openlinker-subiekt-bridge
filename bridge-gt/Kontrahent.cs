@@ -107,17 +107,24 @@ public static class Kontrahent
     /// <summary>
     /// Is this kontrahent's address consistent with the buyer's?
     ///
-    /// Fails OPEN on every unknown: no address on file, nothing to compare, or
-    /// a read error all answer true. A false negative here creates a duplicate
-    /// kontrahent, which is untidy; a false POSITIVE bills one person's
-    /// document to another's name and address, which the operator cannot see
-    /// from Subiekt. So the check only ever REFUSES on a positive
-    /// contradiction.
+    /// #5-review fix: this used to fail open whenever EITHER side lacked a
+    /// field, not only when BOTH did - so a candidate with a blank stored
+    /// address (e.g. created from a prior order that carried none) matched
+    /// ANY incoming buyer, whatever address they supplied. A false negative
+    /// here creates a duplicate kontrahent, which is untidy; a false POSITIVE
+    /// bills one person's document to another's name and address, which the
+    /// operator cannot see from Subiekt - so the rule is now: a match needs
+    /// at least one field CONFIRMED equal on both sides, and no field
+    /// CONTRADICTED. Nothing confirmable on either side is treated as
+    /// insufficient evidence (no match), not as a pass.
     /// </summary>
     public static async Task<bool> MatchesAddress(int kontrahentId, string? kod, string? miasto)
     {
         var wantKod = (kod ?? "").Trim();
         var wantMiasto = (miasto ?? "").Trim();
+        // The buyer supplied no address at all - there is nothing to verify
+        // against, so this is the one case with no evidence in EITHER
+        // direction and the caller's symbol match stands on its own.
         if (wantKod == "" && wantMiasto == "") return true;
 
         try
@@ -130,22 +137,36 @@ public static class Kontrahent
                 "AND a.adr_TypAdresu = 1 WHERE k.kh_Id = @id", c);
             cmd.Parameters.AddWithValue("@id", kontrahentId);
             await using var r = await cmd.ExecuteReaderAsync();
-            if (!await r.ReadAsync()) return true;
+            if (!await r.ReadAsync()) return false;
 
             var storedKod = r.GetString(0).Trim();
             var storedMiasto = r.GetString(1).Trim();
-            if (storedKod == "" && storedMiasto == "") return true;
 
-            if (wantKod != "" && storedKod != "" &&
-                !string.Equals(wantKod, storedKod, StringComparison.OrdinalIgnoreCase)) return false;
-            if (wantMiasto != "" && storedMiasto != "" &&
-                !string.Equals(wantMiasto, storedMiasto, StringComparison.OrdinalIgnoreCase)) return false;
-            return true;
+            var confirmed = false;
+            if (wantKod != "" && storedKod != "")
+            {
+                if (!string.Equals(wantKod, storedKod, StringComparison.OrdinalIgnoreCase)) return false;
+                confirmed = true;
+            }
+            if (wantMiasto != "" && storedMiasto != "")
+            {
+                if (!string.Equals(wantMiasto, storedMiasto, StringComparison.OrdinalIgnoreCase)) return false;
+                confirmed = true;
+            }
+            // Neither field could be checked on both sides (e.g. the buyer
+            // supplied a postcode but this candidate's stored address has
+            // none) - insufficient evidence to confirm this is the same
+            // buyer. Reject rather than accept it by default.
+            return confirmed;
         }
         catch (Exception e)
         {
-            Console.Error.WriteLine($"Kontrahent.MatchesAddress({kontrahentId}): {e.Message} - treating as a match.");
-            return true;
+            // #5-review fix: was "treating as a match" - a transient DB
+            // hiccup would otherwise silently attach a document to whichever
+            // candidate happened to come first. Failing safe here costs an
+            // extra kontrahent at worst; failing open could misattribute one.
+            Console.Error.WriteLine($"Kontrahent.MatchesAddress({kontrahentId}): {e.Message} - treating as no match (fails safe).");
+            return false;
         }
     }
 

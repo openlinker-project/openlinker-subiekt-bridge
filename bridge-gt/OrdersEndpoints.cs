@@ -51,21 +51,39 @@ public static class OrdersEndpoints
     // functions scoped to its top-level statements, not visible from this file,
     // so this mirrors their exact JSON shape rather than sharing them.
     private static IResult Ok<T>(T data) => Results.Ok(new { success = true, data, error = (object?)null });
-    private static IResult Fail(string code, string reason, int status = 422) =>
-        Results.Json(new { success = false, data = (object?)null, error = new { code, reason, correlationId = (string?)null } }, statusCode: status);
+    // #7-review fix: `failureMode` tells a caller "rejected" (a genuine
+    // business/validation refusal - nothing was written, safe to retry with
+    // corrected input) apart from "in-doubt" (a COM-side timeout, whose write
+    // may still commit later - Sfera.Run's own doc: "the bridge's COM-side
+    // wait is NOT tied to the HTTP request's cancellation"). Without it every
+    // failure looked identical and a caller had no way to tell "safe to
+    // retry" from "must verify before retrying".
+    private static IResult Fail(string code, string reason, int status = 422, string failureMode = "rejected") =>
+        Results.Json(new { success = false, data = (object?)null, error = new { code, reason, correlationId = (string?)null, failureMode } }, statusCode: status);
 
     public static void MapOrdersEndpoints(this WebApplication app)
     {
         app.MapPost("/api/orders", async (HttpRequest req) =>
         {
             var body = await req.ReadFromJsonAsync<CreateOrderRequest>();
-            if (body is null)
+            // `Buyer` carries a `= new()` default, but System.Text.Json
+            // overwrites that with an EXPLICIT `"buyer": null` in the body -
+            // caught here rather than dereferencing it inside CreateOrder and
+            // surfacing a raw NullReferenceException as an opaque 500.
+            if (body is null || body.Buyer is null)
                 return Fail("bad_request", "Missing or invalid body.", 400);
 
             try
             {
                 var result = await CreateOrder(body);
                 return Ok(result);
+            }
+            catch (TimeoutException ex)
+            {
+                // Sfera.Run's own doc: the COM-side wait outlives the HTTP
+                // request, so a timeout here does NOT mean nothing was
+                // created - it means we do not know. Never "rejected".
+                return Fail("order_rejected", ex.Message, failureMode: "in-doubt");
             }
             catch (Exception ex)
             {
@@ -75,6 +93,15 @@ public static class OrdersEndpoints
 
         app.MapGet("/api/orders/feed", async (string? since, int? limit) =>
         {
+            // #minor-review fix: an unparsable `since` used to fall through
+            // to ListOrderFeed's own DateTime.Parse, whose FormatException
+            // was caught by the generic handler below and reported as a
+            // 500 sfera_error - misleading retry logic on the caller side
+            // into treating a caller-supplied bad value as a transient
+            // server failure.
+            if (since is { Length: > 0 } && !DateTime.TryParse(since, CultureInfo.InvariantCulture, DateTimeStyles.None, out _))
+                return Fail("bad_request", $"'since' is not a parseable timestamp: '{since}'.", 400);
+
             try
             {
                 var page = await ListOrderFeed(since, limit ?? 50);
@@ -126,6 +153,10 @@ public static class OrdersEndpoints
                 });
                 return Ok(new WriteShippingResponse(numer));
             }
+            catch (TimeoutException ex)
+            {
+                return Fail("sfera_error", ex.Message, 500, failureMode: "in-doubt");
+            }
             catch (Exception ex)
             {
                 return Fail("sfera_error", ex.Message, 500);
@@ -136,104 +167,111 @@ public static class OrdersEndpoints
     /// <summary>
     /// Creates a ZK via the existing Sfera.EnsureKontrahent + Sfera.CreateZk
     /// (Sfera.cs) - the same pair the WooCommerce-shim spike already used, now
-    /// called from the real, port-typed route. Unconditional create, no
-    /// idempotency guard here by design - OrderSyncService owns that
-    /// (OrderProcessorManagerPort's own contract).
+    /// called from the real, port-typed route.
     /// </summary>
     private static async Task<CreateOrderResponse> CreateOrder(CreateOrderRequest req)
     {
         if (req.Buyer.Nazwa.Length == 0)
             throw new InvalidOperationException("Buyer name is required to create a kontrahent.");
 
-        // #3369 idempotency fix, part 1: a retried createOrder call (the
-        // operator's "Retry" action re-running from scratch after an
-        // ambiguous client-side timeout — the bridge's own COM-side wait is
-        // NOT tied to the HTTP request's cancellation, so a write OL gave up
-        // on can still commit later) must not mint a second ZK for the same
-        // order. Mirrors Invoicing.cs's FindByIdempotencyKey exactly — same
-        // dok_NrPelnyOryg field, same Trim30 discipline — except filtered by
-        // 'ZK %' rather than an unconfirmed numeric dok_Typ (see file header
-        // note 2). A hit here means the ORIGINAL call already succeeded
-        // server-side even though the client saw a timeout; return that
-        // document verbatim rather than creating a new one.
-        if (req.OrderRef != "")
+        // #3369 idempotency fix, part 1, and #1-review fix (idempotency race):
+        // a retried createOrder call (the operator's "Retry" action re-running
+        // from scratch after an ambiguous client-side timeout — the bridge's
+        // own COM-side wait is NOT tied to the HTTP request's cancellation, so
+        // a write OL gave up on can still commit later) must not mint a second
+        // ZK for the same order - and the whole check-then-create sequence
+        // below is now SERIALIZED per orderRef via IdempotencyLock, or two
+        // overlapping calls under the same OrderRef could both observe "not
+        // found" and both create a ZK. Mirrors Invoicing.cs's
+        // FindByIdempotencyKey exactly — same dok_NrPelnyOryg field, same
+        // Trim30 discipline — except filtered by 'ZK %' rather than an
+        // unconfirmed numeric dok_Typ (see file header note 2). A hit means
+        // the ORIGINAL call already succeeded server-side even though the
+        // client saw a timeout; that document is returned verbatim rather
+        // than creating a new one. An empty OrderRef has no natural key to
+        // serialize on and runs unlocked, same as before.
+        var lockKey = req.OrderRef != "" ? Trim30(req.OrderRef) : "";
+        return await IdempotencyLock.RunExclusive(lockKey, async () =>
         {
-            var existingZk = await FindExistingZk(req.OrderRef);
-            if (existingZk is not null)
-                return new CreateOrderResponse(existingZk.Value.Id, existingZk.Value.Numer);
-        }
-
-        // #3369 idempotency fix, part 2: EnsureKontrahent's existingId=0 path
-        // ALWAYS creates a fresh kontrahent, so a retry would mint a duplicate.
-        // Resolve an existing one first - by NIP when the buyer supplied one,
-        // else by the deterministic symbol derived from the buyer's name.
-        //
-        // A symbol is only the buyer's NAME, uppercased and cut to 16
-        // characters - it is NOT an identity. Every "Jan Kowalski" in Poland
-        // derives the same one, and two different surnames sharing a
-        // 16-character prefix collide as well. So a symbol match is VERIFIED
-        // against the address before it is trusted; a mismatch falls through to
-        // creation, where Subiekt suffixes the symbol itself. A NIP match needs
-        // no such check - a tax id IS an identity. `Kontrahent.Resolve` is that
-        // whole rule.
-        //
-        // THE SUFFIX IS THE POINT. The comment above this block used to promise
-        // that "a repeat retail order under the same buyer name correctly
-        // resolves to the kontrahent the first attempt created". It did not.
-        // The old lookup matched the BASE symbol exactly, so the moment Subiekt
-        // suffixed a record to `NORBERTKULUS(5)` that record became invisible
-        // to every later order - which then found whatever older record held
-        // the bare symbol, failed the address check against it, and created
-        // `(6)`. Observed live on 2026-09-23: two purchases by one buyer, two
-        // kontrahenci. `Kontrahent.FindBySymbol` sees the `(n)` variants.
-        var symbol = Kontrahent.MakeSymbol(req.Buyer.Nazwa);
-        var existingKontrahentId = await Kontrahent.Resolve(
-            req.Buyer.Nip, symbol, req.Buyer.KodPocztowy, req.Buyer.Miejscowosc) ?? 0;
-
-        // Resolved BEFORE EnsureKontrahent, which is synchronous and runs on
-        // the COM apartment thread. One shared resolver with the invoice path,
-        // so the two cannot map the same code to different countries.
-        //
-        // Skipped entirely for a repeat buyer: EnsureKontrahent returns an
-        // existing kontrahent untouched, so the lookup's result would be
-        // discarded and the SELECT is pure waste on the most common order
-        // there is.
-        var panstwoId = existingKontrahentId == 0
-            ? await Invoicing.ResolveCountryId(req.Buyer.CountryCode)
-            : 0;
-
-        int kontrahentId = Sfera.EnsureKontrahent(new KontrahentInfo
-        {
-            Symbol = symbol,
-            NazwaPelna = req.Buyer.Nazwa,
-            Nip = req.Buyer.Nip ?? "",
-            Ulica = req.Buyer.Ulica ?? "",
-            Kod = req.Buyer.KodPocztowy ?? "",
-            Miejscowosc = req.Buyer.Miejscowosc ?? "",
-            PanstwoId = panstwoId,
-        }, existingId: existingKontrahentId);
-
-        var zkReq = new ZkRequest
-        {
-            KontrahentId = kontrahentId,
-            NumerOryginalny = req.OrderRef,
-            Uwagi = req.Uwagi ?? "",
-            Rezerwacja = false,
-            Waluta = req.Waluta ?? "",
-        };
-        foreach (var line in req.Lines)
-        {
-            zkReq.Lines.Add(new ZkLine
+            if (req.OrderRef != "")
             {
-                Symbol = line.Symbol,
-                Quantity = line.Ilosc,
-                GrossTotal = line.WartoscBrutto,
-                Name = line.Nazwa,
-            });
-        }
+                var existingZk = await FindExistingZk(req.OrderRef);
+                if (existingZk is not null)
+                    return new CreateOrderResponse(existingZk.Value.Id, existingZk.Value.Numer);
+            }
 
-        var (docId, numer) = Sfera.CreateZk(zkReq);
-        return new CreateOrderResponse(docId, numer);
+            // #3369 idempotency fix, part 2: EnsureKontrahent's existingId=0 path
+            // ALWAYS creates a fresh kontrahent, so a retry would mint a duplicate.
+            // Resolve an existing one first - by NIP when the buyer supplied one,
+            // else by the deterministic symbol derived from the buyer's name.
+            //
+            // A symbol is only the buyer's NAME, uppercased and cut to 16
+            // characters - it is NOT an identity. Every "Jan Kowalski" in Poland
+            // derives the same one, and two different surnames sharing a
+            // 16-character prefix collide as well. So a symbol match is VERIFIED
+            // against the address before it is trusted; a mismatch falls through to
+            // creation, where Subiekt suffixes the symbol itself. A NIP match needs
+            // no such check - a tax id IS an identity. `Kontrahent.Resolve` is that
+            // whole rule.
+            //
+            // THE SUFFIX IS THE POINT. The comment above this block used to promise
+            // that "a repeat retail order under the same buyer name correctly
+            // resolves to the kontrahent the first attempt created". It did not.
+            // The old lookup matched the BASE symbol exactly, so the moment Subiekt
+            // suffixed a record to `NORBERTKULUS(5)` that record became invisible
+            // to every later order - which then found whatever older record held
+            // the bare symbol, failed the address check against it, and created
+            // `(6)`. Observed live on 2026-09-23: two purchases by one buyer, two
+            // kontrahenci. `Kontrahent.FindBySymbol` sees the `(n)` variants.
+            var symbol = Kontrahent.MakeSymbol(req.Buyer.Nazwa);
+            var existingKontrahentId = await Kontrahent.Resolve(
+                req.Buyer.Nip, symbol, req.Buyer.KodPocztowy, req.Buyer.Miejscowosc) ?? 0;
+
+            // Resolved BEFORE EnsureKontrahent, which is synchronous and runs on
+            // the COM apartment thread. One shared resolver with the invoice path,
+            // so the two cannot map the same code to different countries.
+            //
+            // Skipped entirely for a repeat buyer: EnsureKontrahent returns an
+            // existing kontrahent untouched, so the lookup's result would be
+            // discarded and the SELECT is pure waste on the most common order
+            // there is.
+            var panstwoId = existingKontrahentId == 0
+                ? await Invoicing.ResolveCountryId(req.Buyer.CountryCode)
+                : 0;
+
+            int kontrahentId = Sfera.EnsureKontrahent(new KontrahentInfo
+            {
+                Symbol = symbol,
+                NazwaPelna = req.Buyer.Nazwa,
+                Nip = req.Buyer.Nip ?? "",
+                Ulica = req.Buyer.Ulica ?? "",
+                Kod = req.Buyer.KodPocztowy ?? "",
+                Miejscowosc = req.Buyer.Miejscowosc ?? "",
+                PanstwoId = panstwoId,
+            }, existingId: existingKontrahentId);
+
+            var zkReq = new ZkRequest
+            {
+                KontrahentId = kontrahentId,
+                NumerOryginalny = req.OrderRef,
+                Uwagi = req.Uwagi ?? "",
+                Rezerwacja = false,
+                Waluta = req.Waluta ?? "",
+            };
+            foreach (var line in req.Lines)
+            {
+                zkReq.Lines.Add(new ZkLine
+                {
+                    Symbol = line.Symbol,
+                    Quantity = line.Ilosc,
+                    GrossTotal = line.WartoscBrutto,
+                    Name = line.Nazwa,
+                });
+            }
+
+            var (docId, numer) = Sfera.CreateZk(zkReq);
+            return new CreateOrderResponse(docId, numer);
+        });
     }
 
     private static async Task<(int Id, string Numer)?> FindExistingZk(string orderRef)

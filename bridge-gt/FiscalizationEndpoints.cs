@@ -61,6 +61,15 @@ public static class FiscalizationEndpoints
     // BridgeConfig.cs. Was a `const` literal here and in five sibling files.
     private static readonly string ConnStr = BridgeConfig.ConnectionString;
 
+    // #11-review fix: this file used to emit a bare STRING `error` instead of
+    // the {code,reason,correlationId} shape every sibling file sends -
+    // exactly the mismatch #3371's fix note (InventoryEndpoints.cs) already
+    // called out for a DIFFERENT file: SubiektBridgeHttpClient (TS) reads
+    // `error.reason`, so every rejected fiscalize call reported a generic
+    // HTTP status with no real reason string on the caller side.
+    private static IResult Fail(string code, string reason, int status = 422, string failureMode = "rejected") =>
+        Results.Json(new { success = false, data = (object?)null, error = new { code, reason, correlationId = (string?)null, failureMode } }, statusCode: status);
+
     public static void MapFiscalizationEndpoints(this WebApplication app)
     {
         app.MapPost("/api/fiscalize", async (HttpRequest req) =>
@@ -73,125 +82,144 @@ public static class FiscalizationEndpoints
             }
             catch (Exception e)
             {
-                return Results.Json(new { success = false, data = (object?)null, error = $"bad request: {e.Message}" }, statusCode: 400);
+                return Fail("bad_request", $"bad request: {e.Message}", 400);
             }
 
             if (body.DrukarkaFiskalnaId <= 0)
-                return Results.Json(new { success = false, data = (object?)null, error = "drukarkaFiskalnaId is required" }, statusCode: 400);
+                return Fail("bad_request", "drukarkaFiskalnaId is required", 400);
 
             // --- VAT-rate resolution (mirrors Invoicing.cs's ResolveVatId) -
+            // #2-review fix: StawkaVAT is nullable with no default (see
+            // FiscalizeLine) so an OMITTED rate is caught here, not just an
+            // invalid one.
             var vatIds = new List<int>();
             foreach (var line in body.Lines)
             {
+                if (string.IsNullOrWhiteSpace(line.StawkaVAT))
+                    return Fail("bad_request", "Each fiscalize line requires an explicit stawkaVAT - no rate was supplied, and this bridge refuses to assume one.", 400);
                 if (!decimal.TryParse(line.StawkaVAT, System.Globalization.NumberStyles.Any,
                         System.Globalization.CultureInfo.InvariantCulture, out var rate))
-                    return Results.Json(new { success = false, data = (object?)null,
-                        error = $"stawkaVAT '{line.StawkaVAT}' is not numeric" }, statusCode: 400);
+                    return Fail("bad_request", $"stawkaVAT '{line.StawkaVAT}' is not numeric", 400);
                 var vatId = await ResolveVatId(rate);
                 if (vatId is null)
-                    return Results.Json(new { success = false, data = (object?)null,
-                        error = $"No VAT rate {line.StawkaVAT}% configured in sl_StawkaVAT." }, statusCode: 400);
+                    return Fail("bad_request", $"No VAT rate {line.StawkaVAT}% configured in sl_StawkaVAT.", 400);
                 vatIds.Add(vatId.Value);
             }
 
-            // --- idempotency pre-check (mirrors Invoicing.cs's FindByIdempotencyKey,
-            //     PA doctype = dok_Typ 21) ------------------------------------
-            var existing = await FindFiscalByIdempotencyKey(body.IdempotencyKey);
-            if (existing is not null)
+            // #1-review fix (idempotency race): the check-then-write below had
+            // no lock between the SELECT and the COM write - two overlapping
+            // calls under the same idempotencyKey could both read "not
+            // found" and both fiscalize, double-registering a real sale on
+            // the physical device. Serialized per reduced key.
+            return await IdempotencyLock.RunExclusive(Trim30(body.IdempotencyKey), async () =>
             {
-                var (exId, exNumer, exStatus) = existing.Value;
-                return Results.Ok(new { success = true, data = new FiscalizeResponse(exId, exNumer, exStatus, null), error = (string?)null });
-            }
-
-            int docId = 0;
-            string numer = "";
-            string? sferaError = null;
-
-            try
-            {
-                // NOTE the 30s timeout — deliberately SHORTER than the other
-                // endpoints (90-120s): a hang here most likely means the
-                // configured DrukarkaFiskalnaId has no reachable physical
-                // device, which should surface as a bridge-level failure
-                // quickly rather than tie up the single Sfera worker thread
-                // waiting on hardware that will never answer. UNVERIFIED —
-                // tune this once a real device is available to measure
-                // against.
-                Sfera.Run(sub =>
+                // --- idempotency pre-check (mirrors Invoicing.cs's FindByIdempotencyKey,
+                //     PA doctype = dok_Typ 21) ------------------------------------
+                var existing = await FindFiscalByIdempotencyKey(body.IdempotencyKey);
+                if (existing is not null)
                 {
-                    dynamic mgr = sub.SuDokumentyManager;
-                    // SuDokumentyManager.DodajPAf() — dedicated fiscal-receipt
-                    // creation, available since GT 1.12
-                    // (Pomoc/gta.chm/SuDokumentyManager_DodajPAf.htm).
-                    dynamic d = mgr.DodajPAf();
-                    try
-                    {
-                        d.LiczonyOdCenBrutto = true;
+                    var (exId, exNumer, exStatus) = existing.Value;
+                    return Ok(new FiscalizeResponse(exId, exNumer, exStatus, null));
+                }
 
-                        for (int i = 0; i < body.Lines.Count; i++)
+                int docId = 0;
+                string numer = "";
+                string? sferaError = null;
+                var timedOut = false;
+
+                try
+                {
+                    // NOTE the 30s timeout — deliberately SHORTER than the other
+                    // endpoints (90-120s): a hang here most likely means the
+                    // configured DrukarkaFiskalnaId has no reachable physical
+                    // device, which should surface as a bridge-level failure
+                    // quickly rather than tie up the single Sfera worker thread
+                    // waiting on hardware that will never answer. UNVERIFIED —
+                    // tune this once a real device is available to measure
+                    // against.
+                    Sfera.Run(sub =>
+                    {
+                        dynamic mgr = sub.SuDokumentyManager;
+                        // SuDokumentyManager.DodajPAf() — dedicated fiscal-receipt
+                        // creation, available since GT 1.12
+                        // (Pomoc/gta.chm/SuDokumentyManager_DodajPAf.htm).
+                        dynamic d = mgr.DodajPAf();
+                        try
                         {
-                            var line = body.Lines[i];
-                            dynamic poz = line.TowarSymbol is { Length: > 0 }
-                                ? d.Pozycje.Dodaj(line.TowarSymbol)
-                                : d.Pozycje.DodajUslugeJednorazowa();
-                            if (line.TowarSymbol is not { Length: > 0 })
+                            d.LiczonyOdCenBrutto = true;
+
+                            for (int i = 0; i < body.Lines.Count; i++)
                             {
-                                poz.UslJednNazwa = line.Nazwa ?? "Pozycja";
-                                poz.Jm = "szt.";
+                                var line = body.Lines[i];
+                                dynamic poz = line.TowarSymbol is { Length: > 0 }
+                                    ? d.Pozycje.Dodaj(line.TowarSymbol)
+                                    : d.Pozycje.DodajUslugeJednorazowa();
+                                if (line.TowarSymbol is not { Length: > 0 })
+                                {
+                                    poz.UslJednNazwa = line.Nazwa ?? "Pozycja";
+                                    poz.Jm = "szt.";
+                                }
+                                poz.IloscJm = line.Ilosc;
+                                poz.VatId = vatIds[i];
+                                var wartosc = line.CenaBrutto * line.Ilosc;
+                                poz.WartoscBruttoPrzedRabatem = wartosc;
+                                poz.WartoscBruttoPoRabacie = wartosc;
                             }
-                            poz.IloscJm = line.Ilosc;
-                            poz.VatId = vatIds[i];
-                            var wartosc = line.CenaBrutto * line.Ilosc;
-                            poz.WartoscBruttoPrzedRabatem = wartosc;
-                            poz.WartoscBruttoPoRabacie = wartosc;
-                        }
 
-                        if (body.StanowiskoKasoweId is int ksaId && ksaId > 0)
+                            if (body.StanowiskoKasoweId is int ksaId && ksaId > 0)
+                            {
+                                try { d.KasaId = ksaId; } catch { /* best-effort, mirrors Invoicing.cs */ }
+                            }
+
+                            d.NumerOryginalny = Trim30(body.IdempotencyKey);
+
+                            // --- the fiscalization act itself ---------------------
+                            d.RejestrujNaUF = true;                       // SuDokument_RejestrujNaUF.htm
+                            d.DrukarkaFiskalnaId = body.DrukarkaFiskalnaId; // SuDokument_DrukarkaFiskalnaId.htm
+
+                            d.Zapisz();
+                            docId = (int)d.Identyfikator;
+                            numer = Convert.ToString(d.NumerPelny) ?? "";
+
+                            // Drives the physical fiscal printer. UNVERIFIED LIVE.
+                            d.Drukuj(true);
+                        }
+                        finally
                         {
-                            try { d.KasaId = ksaId; } catch { /* best-effort, mirrors Invoicing.cs */ }
+                            try { d.Zamknij(); } catch { }
                         }
+                    }, TimeSpan.FromSeconds(30));
+                }
+                catch (TimeoutException)
+                {
+                    timedOut = true;
+                }
+                catch (Exception e)
+                {
+                    sferaError = e.Message;
+                }
 
-                        d.NumerOryginalny = Trim30(body.IdempotencyKey);
+                if (timedOut)
+                    // Sfera.Run's own RecycleWorker already fired; report as a
+                    // transport-level, INDETERMINATE failure (never "rejected"
+                    // — a document/fiscal registration may or may not have
+                    // been created) so the TS adapter's
+                    // SubiektBridgeUnreachableError / 'indeterminate' path
+                    // handles it.
+                    return Fail("sfera_error",
+                        "Sfera did not respond within the fiscalization timeout — the fiscal printer may be unreachable or unconfigured",
+                        504, failureMode: "in-doubt");
 
-                        // --- the fiscalization act itself ---------------------
-                        d.RejestrujNaUF = true;                       // SuDokument_RejestrujNaUF.htm
-                        d.DrukarkaFiskalnaId = body.DrukarkaFiskalnaId; // SuDokument_DrukarkaFiskalnaId.htm
+                if (sferaError is not null || docId == 0)
+                    return Fail("sfera_error", sferaError ?? "unknown Sfera failure", 422);
 
-                        d.Zapisz();
-                        docId = (int)d.Identyfikator;
-                        numer = Convert.ToString(d.NumerPelny) ?? "";
-
-                        // Drives the physical fiscal printer. UNVERIFIED LIVE.
-                        d.Drukuj(true);
-                    }
-                    finally
-                    {
-                        try { d.Zamknij(); } catch { }
-                    }
-                }, TimeSpan.FromSeconds(30));
-            }
-            catch (TimeoutException)
-            {
-                // Sfera.Run's own RecycleWorker already fired; report as a
-                // transport-level failure so the TS adapter's
-                // SubiektBridgeUnreachableError / 'indeterminate' path handles
-                // it — NOT a fiscal rejection (a document may or may not have
-                // been created; unknown).
-                return Results.Json(new { success = false, data = (object?)null,
-                    error = "Sfera did not respond within the fiscalization timeout — the fiscal printer may be unreachable or unconfigured" }, statusCode: 504);
-            }
-            catch (Exception e)
-            {
-                sferaError = e.Message;
-            }
-
-            if (sferaError is not null || docId == 0)
-                return Results.Json(new { success = false, data = (object?)null, error = sferaError ?? "unknown Sfera failure" }, statusCode: 422);
-
-            var (status, rawStatus) = await ReadStatusFiskalny(docId);
-            return Results.Ok(new { success = true, data = new FiscalizeResponse(docId, numer, status, rawStatus), error = (string?)null });
+                var (status, rawStatus) = await ReadStatusFiskalny(docId);
+                return Ok(new FiscalizeResponse(docId, numer, status, rawStatus));
+            });
         });
     }
+
+    private static IResult Ok<T>(T data) => Results.Ok(new { success = true, data, error = (object?)null });
 
     // --- SQL reads (mirror Invoicing.cs's pattern verbatim) -------------
 
@@ -266,7 +294,10 @@ public sealed class FiscalizeLine
     public string? Nazwa { get; set; }
     public decimal Ilosc { get; set; }
     public decimal CenaBrutto { get; set; }
-    public string StawkaVAT { get; set; } = "23";
+    /// <summary>#2-review fix: NO default. A default of "23" here meant an
+    /// omitted rate was silently treated as 23% VAT rather than being
+    /// refused - see MapFiscalizationEndpoints's explicit-presence check.</summary>
+    public string? StawkaVAT { get; set; }
 }
 
 public sealed class FiscalizeRequest

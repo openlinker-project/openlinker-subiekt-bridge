@@ -18,6 +18,17 @@ public static class Sfera
     private static dynamic? _sub;
     private static readonly object Gate = new();
 
+    /// <summary>
+    /// #10-review fix: RecycleWorker abandons a thread + its Sfera session on
+    /// every COM timeout with no operator-visible signal before this degrades
+    /// into a slow handle/session leak. This counts every recycle; nothing
+    /// currently exposes it over HTTP (a spike-scale gap, not fixed here),
+    /// but it is at least visible in the process log and to anything that
+    /// wants to poll it in-process later.
+    /// </summary>
+    public static int RecycleCount => _recycleCount;
+    private static int _recycleCount;
+
     private sealed class Job
     {
         public required Action<dynamic> Work;
@@ -77,6 +88,8 @@ public static class Sfera
     {
         lock (Gate)
         {
+            var count = System.Threading.Interlocked.Increment(ref _recycleCount);
+            Console.Error.WriteLine($"Sfera.RecycleWorker: abandoning the current worker thread + Sfera session (recycle #{count}) - a stuck COM call cannot be aborted on .NET Core.");
             _queue.CompleteAdding();
             _queue = new BlockingCollection<Job>();
             _sub = null;
@@ -88,7 +101,17 @@ public static class Sfera
     {
         Start();
         var job = new Job { Work = work };
-        _queue.Add(job);
+        // #9-review fix: `_queue` is reassigned under `Gate` by RecycleWorker,
+        // but this read (and the .Add() itself) used to happen with no lock
+        // at all - a Run() call racing a concurrent recycle could read the
+        // OLD `_queue` reference and then call .Add() on it right as
+        // RecycleWorker calls CompleteAdding(), which throws
+        // InvalidOperationException - surfacing as a spurious 500 for an
+        // otherwise-healthy request. Reading the reference AND adding to it
+        // both happen under the same lock RecycleWorker mutates under, which
+        // is cheap here: `_queue` is unbounded, so `.Add()` never blocks and
+        // this never contends with the actual (long) COM call below.
+        lock (Gate) { _queue.Add(job); }
         if (!job.Done.Wait(timeout))
         {
             RecycleWorker();

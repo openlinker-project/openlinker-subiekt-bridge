@@ -30,8 +30,11 @@ public static class InventoryEndpoints
     // undefined, so every rejected write reported a generic "HTTP 422"
     // instead of the real Subiekt-side reason, and looksLikeNotFound's
     // reason-matching regex could never match anything.
-    private static IResult Fail(string code, string reason, int status = 422) =>
-        Results.Json(new { success = false, data = (object?)null, error = new { code, reason, correlationId = (string?)null } }, statusCode: status);
+    // #7-review fix: `failureMode` tells a caller "rejected" (safe to retry
+    // as-is once fixed) apart from "in-doubt" (a Sfera.Run COM timeout, whose
+    // write may still commit later - see Sfera.Run's own docblock).
+    private static IResult Fail(string code, string reason, int status = 422, string failureMode = "rejected") =>
+        Results.Json(new { success = false, data = (object?)null, error = new { code, reason, correlationId = (string?)null, failureMode } }, statusCode: status);
 
     private static string Trim30(string s) => s.Length <= 30 ? s : s.Substring(0, 30);
 
@@ -71,6 +74,10 @@ public static class InventoryEndpoints
             {
                 var result = await AdjustInventory(body);
                 return Ok(result);
+            }
+            catch (TimeoutException e)
+            {
+                return Fail("sfera_error", e.Message, failureMode: "in-doubt");
             }
             catch (Exception e)
             {
@@ -120,7 +127,19 @@ public static class InventoryEndpoints
         return list;
     }
 
-    private static async Task<(int Id, string Numer, decimal StanAfter)?> FindByIdempotencyKey(string key, int magazynId)
+    /// <summary>
+    /// #7-review fix: this used to also read a "post-write" stock figure via
+    /// ReadStanForMagazyn(magazynId) - a query with NO towar filter at all
+    /// ("SELECT TOP 1 st_Stan FROM tw_Stan WHERE st_MagId = @mag ORDER BY
+    /// st_TowId DESC"), so it picked an arbitrary product's stock row rather
+    /// than the one the caller actually asked about. It was harmless only
+    /// because AdjustInventory always discarded that value and re-read the
+    /// CORRECTLY towar-filtered figure via ReadStanFor afterward - dead,
+    /// misleading work. Removed rather than fixed in place: the caller
+    /// already has towarSymbol and always re-reads via ReadStanFor, so there
+    /// is nothing this method's result was ever used for.
+    /// </summary>
+    private static async Task<(int Id, string Numer)?> FindByIdempotencyKey(string key)
     {
         if (string.IsNullOrEmpty(key)) return null;
         await using var c = new SqlConnection(ConnStr);
@@ -128,32 +147,9 @@ public static class InventoryEndpoints
         await using var cmd = new SqlCommand(
             "SELECT TOP 1 dok_Id, dok_NrPelny FROM dok__Dokument WHERE dok_NrPelnyOryg = @k", c);
         cmd.Parameters.AddWithValue("@k", Trim30(key));
-        int docId;
-        string numer;
-        await using (var r = await cmd.ExecuteReaderAsync())
-        {
-            if (!await r.ReadAsync()) return null;
-            docId = r.GetInt32(0);
-            numer = r.GetString(1).Trim();
-        }
-        var stanAfter = await ReadStanForMagazyn(docId, magazynId);
-        return (docId, numer, stanAfter);
-    }
-
-    private static async Task<decimal> ReadStanForMagazyn(int _, int magazynId)
-    {
-        // Re-reads CURRENT stock for the magazyn - the dedupe response reports
-        // present stock, not a frozen post-write snapshot from the original
-        // write (that value isn't preserved anywhere queryable by document id
-        // alone without knowing which towar the PW/RW touched from the caller's
-        // own request context - the caller already has towarSymbol).
-        await using var c = new SqlConnection(ConnStr);
-        await c.OpenAsync();
-        await using var cmd = new SqlCommand(
-            "SELECT TOP 1 st_Stan FROM tw_Stan WHERE st_MagId = @mag ORDER BY st_TowId DESC", c);
-        cmd.Parameters.AddWithValue("@mag", magazynId);
-        var r = await cmd.ExecuteScalarAsync();
-        return r is null || r is DBNull ? 0m : Convert.ToDecimal(r);
+        await using var r = await cmd.ExecuteReaderAsync();
+        if (!await r.ReadAsync()) return null;
+        return (r.GetInt32(0), r.GetString(1).Trim());
     }
 
     private static async Task<decimal> ReadStanFor(string towarSymbol, int magazynId)
@@ -177,44 +173,56 @@ public static class InventoryEndpoints
         // it has none yet.
         var magazynId = req.MagazynId ?? await ResolveDefaultMagazyn(req.TowarSymbol);
 
-        if (req.IdempotencyKey is { Length: > 0 } key)
+        // #1-review fix (idempotency race): the SELECT above and the check-then-
+        // write below used to have nothing between them. Two overlapping calls
+        // under the SAME idempotencyKey (a caller retry racing the original,
+        // still-in-flight request - Sfera.Run's COM-side wait outlives the
+        // HTTP request that started it) could both read "not found" and both
+        // write a PW/RW, double-moving stock. Serialized per reduced key via
+        // IdempotencyLock; a blank key (opt-in dedup, caller supplied none)
+        // runs unlocked exactly as before.
+        var lockKey = req.IdempotencyKey is { Length: > 0 } lk ? Trim30(lk) : "";
+        return await IdempotencyLock.RunExclusive(lockKey, async () =>
         {
-            var existing = await FindByIdempotencyKey(key, magazynId);
-            if (existing is not null)
+            if (req.IdempotencyKey is { Length: > 0 } key)
             {
-                var (exId, exNumer, _) = existing.Value;
-                var stanNow = await ReadStanFor(req.TowarSymbol, magazynId);
-                return new AdjustResponse(true, exId, exNumer, stanNow);
+                var existing = await FindByIdempotencyKey(key);
+                if (existing is not null)
+                {
+                    var (exId, exNumer) = existing.Value;
+                    var stanNow = await ReadStanFor(req.TowarSymbol, magazynId);
+                    return new AdjustResponse(true, exId, exNumer, stanNow);
+                }
             }
-        }
 
-        int docId = 0;
-        string numer = "";
-        Sfera.Run(sub =>
-        {
-            dynamic mgr = sub.SuDokumentyManager;
-            // DodajPW (Przyjecie Wewnetrzne, increase) / DodajRW (Rozchod
-            // Wewnetrzny, decrease) - SuDokumentyManager_DodajPW.htm /
-            // _DodajRW.htm, confirmed present in this GT install's method list.
-            dynamic d = req.Delta > 0 ? mgr.DodajPW() : mgr.DodajRW();
-            try
+            int docId = 0;
+            string numer = "";
+            Sfera.Run(sub =>
             {
-                try { d.MagazynId = magazynId; } catch { }
-                dynamic poz = d.Pozycje.Dodaj(req.TowarSymbol);
-                poz.IloscJm = Math.Abs(req.Delta);
+                dynamic mgr = sub.SuDokumentyManager;
+                // DodajPW (Przyjecie Wewnetrzne, increase) / DodajRW (Rozchod
+                // Wewnetrzny, decrease) - SuDokumentyManager_DodajPW.htm /
+                // _DodajRW.htm, confirmed present in this GT install's method list.
+                dynamic d = req.Delta > 0 ? mgr.DodajPW() : mgr.DodajRW();
+                try
+                {
+                    try { d.MagazynId = magazynId; } catch { }
+                    dynamic poz = d.Pozycje.Dodaj(req.TowarSymbol);
+                    poz.IloscJm = Math.Abs(req.Delta);
 
-                if (!string.IsNullOrEmpty(req.Uwagi)) d.Uwagi = req.Uwagi;
-                if (req.IdempotencyKey is { Length: > 0 } k2) d.NumerOryginalny = Trim30(k2);
+                    if (!string.IsNullOrEmpty(req.Uwagi)) d.Uwagi = req.Uwagi;
+                    if (req.IdempotencyKey is { Length: > 0 } k2) d.NumerOryginalny = Trim30(k2);
 
-                d.Zapisz();
-                docId = (int)d.Identyfikator;
-                numer = Convert.ToString(d.NumerPelny) ?? "";
-            }
-            finally { try { d.Zamknij(); } catch { } }
-        }, TimeSpan.FromSeconds(90));
+                    d.Zapisz();
+                    docId = (int)d.Identyfikator;
+                    numer = Convert.ToString(d.NumerPelny) ?? "";
+                }
+                finally { try { d.Zamknij(); } catch { } }
+            }, TimeSpan.FromSeconds(90));
 
-        var stanAfter = await ReadStanFor(req.TowarSymbol, magazynId);
-        return new AdjustResponse(false, docId, numer, stanAfter);
+            var stanAfter = await ReadStanFor(req.TowarSymbol, magazynId);
+            return new AdjustResponse(false, docId, numer, stanAfter);
+        });
     }
 
     private static async Task<int> ResolveDefaultMagazyn(string towarSymbol)

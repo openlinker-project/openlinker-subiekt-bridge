@@ -28,10 +28,13 @@ public static class BridgeConfig
     private static readonly Dictionary<string, string> FileValues = LoadFile();
 
     /// <summary>SQL Server instance holding the Subiekt database. The default
-    /// is InsERT's own installer default, which is what a stock installation
-    /// uses; a machine name compiled in here would name one host and be wrong
-    /// everywhere else.</summary>
-    public static readonly string SqlServer = Read("SqlServer", @"localhost\INSERTNEXO");
+    /// is InsERT's own installer default for a GT install
+    /// (`localhost\INSERTGT` - this file lives in `bridge-gt/`, the GT-only
+    /// bridge; the sibling nexo bridge's own config still uses
+    /// `localhost\INSERTNEXO`, which is INSERT's default for THAT product
+    /// line, not this one). A machine name compiled in here would name one
+    /// host and be wrong everywhere else.</summary>
+    public static readonly string SqlServer = Read("SqlServer", @"localhost\INSERTGT");
 
     /// <summary>Subiekt database name.</summary>
     public static readonly string SqlDatabase = Read("SqlDatabase", "DEMO");
