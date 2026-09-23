@@ -1,4 +1,4 @@
-// InventoryEndpoints - InventoryMaster capability.
+﻿// InventoryEndpoints - InventoryMaster capability.
 //
 // Speaks the contract in libs/integrations/subiekt/src/bridge/subiekt-bridge-inventory.types.ts.
 // Reads go via raw SQL on tw_Stan (confirmed live this session:

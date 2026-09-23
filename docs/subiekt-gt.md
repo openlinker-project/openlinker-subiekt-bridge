@@ -52,30 +52,109 @@ nothing in this bridge or this document claims it.
   **compiled-in default** because that is what this sandbox happens to run as; it is not a
   recommendation.
 
-## Build and run
+## Run it, step by step
 
-All commands are plain Windows PowerShell.
+Everything here happens on the Windows machine where Subiekt GT is installed. All commands are
+plain PowerShell.
+
+**1. Get the source and the .NET 8 SDK.**
 
 ```powershell
-cd bridge-gt
+git clone https://github.com/openlinker-project/openlinker-subiekt-bridge.git
+cd openlinker-subiekt-bridge\bridge-gt
+```
+
+The bridge is run from source with `dotnet run`; there is no installer and no packaged `.exe`
+to download. It needs the .NET 8 SDK on this machine (`dotnet --version` should print 8.x).
+
+**2. Close the Subiekt GT client if it is open.**
+
+The bridge attaches to Subiekt through COM automation and the desktop client holds the same
+session. Leaving it open is the most common cause of a bridge that starts and then fails every
+request.
+
+**3. Make your own `appsettings.json`.**
+
+```powershell
 copy appsettings.example.json appsettings.json
 notepad appsettings.json
-dotnet run -c Release
 ```
 
-A healthy bridge logs its resolved configuration on one line (`BridgeConfig.Describe()` -
-secrets are deliberately never echoed) and then attaches to Subiekt GT in the background before
-the first request arrives (see "Cold attach" below).
+At minimum set `SqlServer`, `SqlDatabase` and `SferaOperator` to match this installation, and
+set `InvoiceToken` - see step 4.
 
-Smoke test:
+**4. Choose the bridge token yourself.**
+
+`InvoiceToken` is a shared secret **you invent**. Nobody issues it, it is not printed anywhere,
+and it is not compiled into the binary. Pick a long random string, put it in `appsettings.json`
+(or set `OL_BRIDGE_INVOICE_TOKEN` in the environment), and paste **the same value** into the
+*Bridge token* field when you add the connection in OpenLinker. The two must match exactly.
+
+Until you set it, the bridge answers every `/api/*` request with `401` and the message
+`bridge token is not configured`. That is deliberate - a credential compiled into a binary is a
+credential everybody has - but it means an unset token is not a "no security" mode, it is a
+bridge that serves OpenLinker nothing.
+
+**5. Open the firewall, if OpenLinker runs on another machine.**
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:5056/health
+New-NetFirewallRule -DisplayName "OpenLinker Subiekt GT bridge" -Direction Inbound `
+  -Protocol TCP -LocalPort 5055,5056 -Action Allow -Profile Private
 ```
 
-(`5056` is the plain-HTTP port's default - see Configuration. `/health` is deliberately
-unauthenticated, alongside `/gt-image`, so a load balancer or monitoring probe needs no
-credential.)
+Scope it to the profile your LAN actually uses. The bridge's only authentication is the shared
+token, so do not expose these ports to the internet.
+
+**6. Start it.**
+
+```powershell
+.\start-bridge.bat
+```
+
+The launcher kills any bridge already running before it builds, which avoids the
+"address already in use" crash - Kestrel does not retry a busy port. A console window stays open
+showing live logs; **closing it stops the bridge**. There is no Windows Service wrapper and no
+auto-restart; for an unattended install, wrap `start-bridge.bat` in a Task Scheduler task set to
+run at startup, or register it with NSSM.
+
+On a healthy start the bridge logs its resolved configuration on one line
+(`BridgeConfig.Describe()` - secrets are deliberately never echoed) and then attaches to Subiekt
+GT in the background before the first request arrives (see "Cold attach" below).
+
+**7. Verify - from the machine OpenLinker runs on, not from this one.**
+
+Reachability:
+
+```powershell
+Invoke-RestMethod http://<bridge-host>:5056/health
+```
+
+That proves the bridge is up and nothing more. `/health` is deliberately unauthenticated,
+alongside `/gt-image`, so a load balancer or monitoring probe needs no credential - which also
+means **a passing `/health` says nothing about your token**. Check the token too:
+
+```powershell
+Invoke-RestMethod http://<bridge-host>:5056/api/bank-accounts `
+  -Headers @{ Authorization = "Bearer <your-token>" }
+```
+
+A `200` with a `{ success: true, ... }` envelope means the token works. A `401` means it does
+not, and the response body says which problem you have - a wrong value, or a bridge where
+`InvoiceToken` was never set.
+
+**8. Add the connection in OpenLinker.**
+
+*Connections -> New connection -> Subiekt GT.* Bridge URL is `http://<bridge-host>:5056` (or
+`https://<bridge-host>:5055` once you configure a certificate), and Bridge token is the value
+from step 4. OpenLinker's own *Test connection* runs the authorized check from step 7, so a
+green result there means reachable **and** authorized.
+
+### Which port goes in the Bridge URL
+
+`5055` serves HTTPS and only opens when `CertificatePath` / `CertificatePassword` are set;
+`5056` serves plain HTTP and is always open. With no certificate configured - the common LAN
+case - `5056` is the port OpenLinker reaches the bridge on. Configure a certificate and use
+`5055` when the bridge and OpenLinker are not on the same trusted network.
 
 ## Configuration
 
@@ -101,10 +180,10 @@ cannot take the bridge down in a way nobody on-site can fix.
 | `SferaOperator` | Operator account the COM session logs in as | Yes (`Szef`) |
 | `SferaPassword` | That operator's password | **No** - blank is a legitimate value on a demo install with no operator password set |
 | `ApiUser` / `ApiPassword` | HTTP Basic credentials guarding the WooCommerce-dialect shim routes | **No** - unset leaves those routes closed |
-| `InvoiceToken` | Bearer / `x-bridge-token` value guarding the `/api/*` routes | **No** - unset leaves those routes closed |
+| `InvoiceToken` | Bearer / `x-bridge-token` value guarding the `/api/*` routes. **You choose this value** and paste the same one into OpenLinker's *Bridge token* field - see step 4 | **No** - unset leaves those routes closed |
 | `CertificatePath` / `CertificatePassword` | HTTPS certificate for the Kestrel HTTPS listener | **No** - unset means the HTTPS listener is simply not opened |
 | `HttpsPort` | HTTPS listener port | Yes (`5055`) |
-| `HttpPort` | Plain-HTTP listener port (images only - see below) | Yes (`5056`) |
+| `HttpPort` | Plain-HTTP listener port. Serves images AND, when no certificate is configured, the port OpenLinker reaches the bridge on | Yes (`5056`) |
 | `PublicBase` | Externally-resolvable base URL images are served under | Yes (this sandbox's own) |
 
 Two things about the three auth keys are load-bearing, not incidental: they default to the empty
@@ -182,8 +261,20 @@ store, with no OpenLinker-side code change:
   confirmation dialog when an existing kontrahent record is written again, and a COM call that
   triggers a modal dialog blocks forever - .NET Core has no way to cancel it. So the bridge always
   resolves an existing kontrahent first and returns it untouched; it only creates a new one when
-  none exists. The same rule applies to the order and invoicing paths independently, since both
-  need to create or reuse a kontrahent. A small best-effort `DialogWatcher` background thread
-  additionally dismisses a short, text-matched list of known-harmless dialogs, as a backstop for
-  the class of dialog nobody has hit yet - it is not the primary defence, the never-resave rule
-  is.
+  none exists. A small best-effort `DialogWatcher` background thread additionally dismisses a
+  short, text-matched list of known-harmless dialogs, as a backstop for the class of dialog nobody
+  has hit yet - it is not the primary defence, the never-resave rule is.
+- **"Which kontrahent is this buyer" is answered in ONE place, `Kontrahent.cs`.** The order path,
+  the invoicing path and the WooCommerce shim each used to carry their own copy of the lookup,
+  and all three matched the symbol exactly. Subiekt appends a suffix when a symbol collides, so
+  the moment it stored a buyer as `NORBERTKULUS(5)` that record became invisible to every one of
+  them and the next order created yet another contractor - observed live, two purchases by the
+  same person landing on contractors 94 and 95. The shared resolver matches the base symbol *and*
+  Subiekt's `SYMBOL(n)` variants, verifies the address before accepting a match, and falls back to
+  the tax id where one is given. It is deliberately not a `LIKE` query: the symbol is built from
+  the buyer's name and can legitimately contain `_`, which `LIKE` reads as a wildcard.
+- **A paragon cannot carry a buyer, and that is Subiekt's rule, not ours.** Assigning a
+  kontrahent to a receipt object and reading it straight back returns empty; the identical
+  assignment on an invoice persists. So a receipt records the sale without naming the customer.
+  The contractor record is still created with full details and the customer order document does
+  carry it, which is where "who bought this, and how often" is answerable.

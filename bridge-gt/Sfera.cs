@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Sfera GT writer.
  *
  * COM is apartment-bound, so every call runs on one dedicated STA thread with a

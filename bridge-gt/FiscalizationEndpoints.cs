@@ -1,4 +1,4 @@
-// FiscalizationEndpoints.cs - fiscal registration (paragon fiskalny) over Sfera GT.
+﻿// FiscalizationEndpoints.cs - fiscal registration (paragon fiskalny) over Sfera GT.
 //
 // NOT VERIFIED AGAINST A FISCAL PRINTER. It compiles, and its mechanism is
 // taken from the GT documentation cited below, but no part of it has been run

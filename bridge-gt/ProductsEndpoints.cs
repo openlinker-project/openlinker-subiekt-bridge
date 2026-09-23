@@ -1,4 +1,4 @@
-// ProductsEndpoints - ProductMaster capability.
+﻿// ProductsEndpoints - ProductMaster capability.
 //
 // Speaks the contract in libs/integrations/subiekt/src/bridge/subiekt-bridge-products.types.ts
 // (English /api/products* routes, {success,data,error} envelope, Polish field

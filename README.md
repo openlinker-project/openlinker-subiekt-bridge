@@ -10,8 +10,10 @@ This repository covers **two different InsERT products**, not two variants of on
 - **`bridge/`** - **Subiekt nexo**, integrated through the managed **InsERT Sfera SDK**. This is
   the bridge the rest of this README describes.
 - **`bridge-gt/`** - **Subiekt GT**, a different InsERT product integrated through classic
-  **COM automation** (`InsERT.GT`) plus direct SQL reads against Subiekt GT's own schema. See
-  [`docs/subiekt-gt.md`](docs/subiekt-gt.md).
+  **COM automation** (`InsERT.GT`) plus direct SQL reads against Subiekt GT's own schema.
+  [`docs/subiekt-gt.md`](docs/subiekt-gt.md) covers it, including a step-by-step
+  [run it, step by step](docs/subiekt-gt.md#run-it-step-by-step) from a fresh clone to a
+  working OpenLinker connection.
 
 The two share **no code**. Sfera nexo and Subiekt GT's COM automation are different integration
 surfaces with different threading models, different failure modes and a different database
@@ -21,7 +23,7 @@ with Subiekt GT, skip ahead to `docs/subiekt-gt.md`.
 
 ## Why this exists
 
-OpenLinker's Subiekt nexo invoicing adapter (`@openlinker/integrations-subiekt`) never talks
+OpenLinker's Subiekt nexo invoicing adapter (`@openlinker/integrations-subiekt-nexo`) never talks
 to Subiekt directly. Sfera is a Windows-only SDK with no Linux or cross-platform client, while
 OpenLinker's core API runs on Linux/containers. The bridge is the piece that lives on the
 Windows machine where Subiekt nexo is installed, exposes a small HTTPS API, and translates
@@ -157,7 +159,7 @@ or trust the certificate first.)
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — design decisions
 - [`docs/API_ENDPOINTS.md`](docs/API_ENDPOINTS.md) — bridge endpoint reference
 - [`docs/SUBIEKT_OPENLINKER_INTEGRATION.md`](docs/SUBIEKT_OPENLINKER_INTEGRATION.md) — how this
-  bridge plugs into OpenLinker's `@openlinker/integrations-subiekt` adapter
+  bridge plugs into OpenLinker's `@openlinker/integrations-subiekt-nexo` adapter
 
 ## Cockpit (manual test harness)
 

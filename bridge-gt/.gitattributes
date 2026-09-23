@@ -1,0 +1,14 @@
+# The GT bridge is edited on the Windows machine that has Subiekt GT installed
+# and copied into this repository verbatim. Git must therefore not rewrite its
+# bytes on the way in or out: with normalisation on, every sync from that
+# machine produces a whole-file diff in line endings alone, which buries the
+# real change and makes review useless.
+#
+# `-text` disables end-of-line conversion only. Textual diff and blame are
+# unaffected.
+#
+# Note the deliberate divergence from the repository's `.editorconfig`, which
+# asks for CRLF: that file describes what an editor should WRITE, and the
+# editor writing these files is on the other machine. The sibling nexo bridge
+# under `bridge/` is edited here and keeps the repository default.
+* -text
