@@ -3,6 +3,22 @@
 A small .NET 8 service that lets [OpenLinker](https://github.com/openlinker-project/openlinker)
 issue invoices in **Subiekt nexo** via the **InsERT Sfera SDK**.
 
+## Two InsERT products, two bridges
+
+This repository covers **two different InsERT products**, not two variants of one:
+
+- **`bridge/`** - **Subiekt nexo**, integrated through the managed **InsERT Sfera SDK**. This is
+  the bridge the rest of this README describes.
+- **`bridge-gt/`** - **Subiekt GT**, a different InsERT product integrated through classic
+  **COM automation** (`InsERT.GT`) plus direct SQL reads against Subiekt GT's own schema. See
+  [`docs/subiekt-gt.md`](docs/subiekt-gt.md).
+
+The two share **no code**. Sfera nexo and Subiekt GT's COM automation are different integration
+surfaces with different threading models, different failure modes and a different database
+schema, so nothing here should be read as a claim that a fix or a feature in one also applies to
+the other. If you're working with Subiekt nexo, everything below is for you; if you're working
+with Subiekt GT, skip ahead to `docs/subiekt-gt.md`.
+
 ## Why this exists
 
 OpenLinker's Subiekt nexo invoicing adapter (`@openlinker/integrations-subiekt`) never talks
