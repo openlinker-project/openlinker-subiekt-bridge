@@ -1,4 +1,4 @@
-﻿// OpenLinker <- Subiekt GT spike bridge.
+// OpenLinker <- Subiekt GT spike bridge.
 // Speaks a READ-ONLY subset of the WooCommerce REST v3 dialect so the shipped
 // OpenLinker WooCommerce ProductMaster/InventoryMaster adapters can consume
 // Subiekt GT without any change to OpenLinker itself.
@@ -36,11 +36,18 @@ string Pass = BridgeConfig.ApiPassword;
 string InvoiceToken = BridgeConfig.InvoiceToken;
 const int VariationIdOffset = 1_000_000;
 const int ModelIdOffset = 900_000;
-// Image URLs are fetched by OpenLinker (and by Allegro, through it), so they must
-// resolve from OUTSIDE this machine's loopback. "localhost" silently yields
-// IMAGE_DOWNLOAD_FAILED on the marketplace side.
-// OL_BRIDGE_PUBLIC_BASE still wins, through BridgeConfig's own env rung.
-string PublicBase = BridgeConfig.PublicBase;
+// Image URLs here must resolve from OUTSIDE this machine's loopback, because the
+// consumer is a browser or a marketplace - never this bridge and never, as an
+// older comment claimed, OpenLinker, which copies the string and does not fetch it.
+//
+// BridgeConfig.PublicBase no longer carries a compiled-in default (a container-only
+// hostname could only ever be right on one stand). The NATIVE /api/* surface derives
+// its base from the incoming request instead; these WooCommerce-shim routes are a
+// retired spike whose helpers are plain functions with no request in scope, so they
+// keep a local fallback rather than being rewired. Set PublicBase and both agree.
+string PublicBase = BridgeConfig.PublicBase.Length > 0
+    ? BridgeConfig.PublicBase
+    : $"http://host.docker.internal:{BridgeConfig.HttpPort}";
 
 var builder = WebApplication.CreateBuilder(args);
 builder.WebHost.ConfigureKestrel(k =>
@@ -63,6 +70,19 @@ var app = builder.Build();
 // variable and sees no effect must be able to tell "not read" from
 // "read and overridden". Secrets are deliberately NOT echoed.
 app.Logger.LogInformation("{Config}", BridgeConfig.Describe());
+// Said once, loudly, at startup: an image URL nobody can dereference shows up as a
+// broken thumbnail, which an operator's screen renders exactly like a product that
+// has no photo - so nothing on the surface ever reports it.
+if (BridgeConfig.PublicBaseIsContainerOnly)
+    app.Logger.LogWarning(
+        "PublicBase is set to '{Base}', a hostname only a container resolves. Image links built from it "
+        + "will not load in a browser or on a marketplace. Set PublicBase (or OL_BRIDGE_PUBLIC_BASE) to an "
+        + "address those can reach - for a browser on this machine that is http://localhost:{Port}.",
+        BridgeConfig.PublicBase, BridgeConfig.HttpPort);
+else if (BridgeConfig.PublicBase.Length == 0)
+    app.Logger.LogInformation(
+        "PublicBase is unset; image links are built from each request's own scheme and host. Set it "
+        + "explicitly when the browser reaches this bridge at a different address than the caller does.");
 
 // #12-review fix: the sibling `bridge/` (nexo) refuses to boot on a
 // non-loopback bind with no TLS configured. This bridge cannot do the same

@@ -107,10 +107,46 @@ public static class BridgeConfig
     /// marketplaces fetch them, so it cannot be loopback-only.</summary>
     public static readonly int HttpPort = ReadInt("HttpPort", 5056);
 
-    /// <summary>Externally-resolvable base URL images are served under. A
-    /// "localhost" here silently yields IMAGE_DOWNLOAD_FAILED marketplace-side.</summary>
-    public static readonly string PublicBase =
-        Read("PublicBase", "http://host.docker.internal:5056");
+    /// <summary>Base URL the image links in a catalogue read are built from.
+    ///
+    /// THE CONSUMER IS THE BROWSER, NOT OPENLINKER. OpenLinker never fetches an
+    /// image: it copies the string into its own catalogue, and the only things
+    /// that dereference it are the operator's browser and, eventually, a
+    /// marketplace. The previous compiled default named `host.docker.internal`,
+    /// which is a container-only name - measured on the reference stand, the
+    /// OpenLinker worker resolves it and a browser on the very same machine
+    /// does not, so every thumbnail failed while every sync reported success.
+    ///
+    /// There is no default any more, deliberately. Unset, the base is derived
+    /// from the address the request came in on (see ResolveImageBase), which is
+    /// right whenever the caller and the browser share a network view and is at
+    /// worst no more wrong than a guess. An operator whose browser reaches the
+    /// bridge at a different address than OpenLinker does - a Docker Desktop
+    /// stand is exactly that - must set this key, and the startup log says so.
+    ///
+    /// A "localhost" here is correct for a browser on the bridge's own machine
+    /// and wrong for a marketplace, which needs a publicly-resolvable name.</summary>
+    public static readonly string PublicBase = Read("PublicBase", "");
+
+    /// <summary>The base an image URL is built from for THIS request: the
+    /// operator's explicit <see cref="PublicBase"/> when set, otherwise the
+    /// scheme and host the request arrived on.
+    ///
+    /// Deriving from the request is not a fix for the split-view case above -
+    /// it answers with the CALLER's view of the bridge, and the caller is
+    /// OpenLinker rather than the browser - but it is right for every
+    /// deployment where the two agree, and it removes a hardcoded hostname
+    /// that could only ever be correct on one machine.</summary>
+    public static string ResolveImageBase(HttpRequest request) =>
+        PublicBase.Length > 0 ? PublicBase : $"{request.Scheme}://{request.Host}";
+
+    /// <summary>True when the effective base names a host only a container can
+    /// resolve. Reported at startup rather than silently accepted: the symptom
+    /// otherwise is a broken thumbnail, which the operator's screen renders
+    /// identically to a product that simply has no photo.</summary>
+    public static bool PublicBaseIsContainerOnly =>
+        PublicBase.Contains("host.docker.internal", StringComparison.OrdinalIgnoreCase)
+        || PublicBase.Contains("gateway.docker.internal", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Reports which rung answered each key, for the startup log - an
     /// operator who set an environment variable and sees no effect needs to be
@@ -120,7 +156,7 @@ public static class BridgeConfig
         var file = FileValues.Count == 0 ? "none" : $"{FileName} ({FileValues.Count} key(s))";
         return $"config: file={file}; sqlServer={SqlServer}; sqlDatabase={SqlDatabase}; "
              + $"sferaOperator={SferaOperator}; httpsPort={HttpsPort}; httpPort={HttpPort}; "
-             + $"publicBase={PublicBase}; httpsConfigured={HttpsConfigured}; shimAuthConfigured={ShimAuthConfigured}; "
+             + $"publicBase={(PublicBase.Length > 0 ? PublicBase : "<derived from request>")}; httpsConfigured={HttpsConfigured}; shimAuthConfigured={ShimAuthConfigured}; "
              + $"tokenAuthConfigured={TokenAuthConfigured}";
     }
 
