@@ -211,7 +211,8 @@ public static class ProductsEndpoints
         await using var cmd = new SqlCommand(
             @"SELECT t.tw_Symbol, t.tw_Nazwa, t.tw_Opis, t.tw_JednMiary, t.tw_Masa,
                      c.tc_CenaNetto1, c.tc_CenaBrutto1, v.vat_Stawka, t.tw_Id,
-                     g.grt_Id, g.grt_Nazwa, md.mdt_Id, md.mdt_Nazwa
+                     g.grt_Id, g.grt_Nazwa, md.mdt_Id, md.mdt_Nazwa,
+                     c.tc_IdWaluta1
               FROM sl_ModelTw md
               JOIN sl_ModelTowar mt ON mt.mtw_IdModel = md.mdt_Id
               JOIN tw__Towar t ON t.tw_Id = mt.mtw_IdTowar AND t.tw_Usuniety = 0
@@ -268,7 +269,8 @@ public static class ProductsEndpoints
         await using var cmd = new SqlCommand(
             @"SELECT TOP (@lim) t.tw_Symbol, t.tw_Nazwa, t.tw_Opis, t.tw_JednMiary, t.tw_Masa,
                      c.tc_CenaNetto1, c.tc_CenaBrutto1, v.vat_Stawka, t.tw_Id,
-                     g.grt_Id, g.grt_Nazwa, md.mdt_Id, md.mdt_Nazwa
+                     g.grt_Id, g.grt_Nazwa, md.mdt_Id, md.mdt_Nazwa,
+                     c.tc_IdWaluta1
               FROM tw__Towar t
               LEFT JOIN tw_Cena c ON c.tc_IdTowar = t.tw_Id
               LEFT JOIN sl_StawkaVAT v ON v.vat_Id = t.tw_IdVatSp
@@ -321,7 +323,8 @@ public static class ProductsEndpoints
         await using var cmd = new SqlCommand(
             @"SELECT TOP 1 t.tw_Symbol, t.tw_Nazwa, t.tw_Opis, t.tw_JednMiary, t.tw_Masa,
                      c.tc_CenaNetto1, c.tc_CenaBrutto1, v.vat_Stawka, t.tw_Id,
-                     g.grt_Id, g.grt_Nazwa, md.mdt_Id, md.mdt_Nazwa
+                     g.grt_Id, g.grt_Nazwa, md.mdt_Id, md.mdt_Nazwa,
+                     c.tc_IdWaluta1
               FROM tw__Towar t
               LEFT JOIN tw_Cena c ON c.tc_IdTowar = t.tw_Id
               LEFT JOIN sl_StawkaVAT v ON v.vat_Id = t.tw_IdVatSp
@@ -393,7 +396,13 @@ public static class ProductsEndpoints
         r.GetString(1).Trim(),
         r.IsDBNull(5) ? null : r.GetDecimal(5),
         r.IsDBNull(6) ? null : r.GetDecimal(6),
-        "PLN",
+        // tw_Cena.tc_IdWaluta1 - the currency of the SAME price level the two
+        // amounts above come from, and despite the `Id` in its name it holds
+        // the ISO code itself, so there is nothing to join. Reading it replaces
+        // a hardcoded "PLN" that told every caller the shop prices in zloty
+        // whatever it actually does. Null only when the towar carries no price
+        // row at all, which is also when both amounts above are null.
+        r.IsDBNull(13) ? null : r.GetString(13).Trim(),
         r.IsDBNull(2) ? null : r.GetString(2).Trim(),
         barcode,
         r.IsDBNull(3) ? null : r.GetString(3).Trim(),
@@ -474,17 +483,58 @@ public static class ProductsEndpoints
     /// cannot know it yet (a brand-new towar, whose classification this
     /// bridge cannot read before it exists) does this fall back to 23%, and
     /// it says so loudly rather than silently.</summary>
-    private static void SetGrossPriceLevel0(dynamic tw, decimal grossPrice, decimal? vatRatePercent = null)
+    /// <summary>The price level both writers below act on: level id 0, or the
+    /// first one when the towar carries no level 0.
+    ///
+    /// Extracted so the price writer and the currency writer cannot disagree
+    /// about WHICH level they are writing - an amount on one level and its
+    /// currency on another is a price that says a different thing depending on
+    /// which column you read.</summary>
+    private static dynamic? ResolvePriceLevel(dynamic tw)
     {
         dynamic ceny = tw.Ceny;
         int count = ceny.Liczba;
-        dynamic? target = null;
         for (int i = 1; i <= count; i++)
         {
             dynamic poziom = ceny.Element(i);
-            if ((int)poziom.Id == 0) { target = poziom; break; }
+            if ((int)poziom.Id == 0) return poziom;
         }
-        target ??= count > 0 ? ceny.Element(1) : null;
+        return count > 0 ? ceny.Element(1) : null;
+    }
+
+    /// <summary>Write the currency of the price level, which is where Subiekt
+    /// keeps it (<c>tw_Cena.tc_IdWaluta1</c>, read back by
+    /// <see cref="RowToProduct"/>) - a towar has no currency of its own.
+    ///
+    /// Both request DTOs have always carried `Waluta` and neither writer ever
+    /// used it, while OpenLinker really does send it on create and on update.
+    /// Combined with the hardcoded "PLN" the read used to return, a shop
+    /// pricing in anything else was wrong twice and consistent with itself, so
+    /// nothing could notice.
+    ///
+    /// Best-effort, like the other optional attributes here: the level object
+    /// may refuse a currency the install has not configured, and that is the
+    /// shop's answer rather than ours to override. A refusal says so on stderr
+    /// instead of vanishing.</summary>
+    private static void SetPriceLevelCurrency(dynamic tw, string? waluta, string symbol)
+    {
+        if (waluta is not { Length: > 0 }) return;
+        try
+        {
+            dynamic? target = ResolvePriceLevel(tw);
+            if (target is null) return;
+            target.Waluta = waluta;
+        }
+        catch (Exception e)
+        {
+            Console.Error.WriteLine(
+                $"ProductsEndpoints.SetPriceLevelCurrency: could not set currency {waluta} on towar {symbol} - {e.Message}");
+        }
+    }
+
+    private static void SetGrossPriceLevel0(dynamic tw, decimal grossPrice, decimal? vatRatePercent = null)
+    {
+        dynamic? target = ResolvePriceLevel(tw);
         if (target is null) return;
 
         // Setting .Brutto ALONE left tc_CenaBrutto1 at 0 in live testing this
@@ -520,6 +570,36 @@ public static class ProductsEndpoints
 
     // --- Sfera writes -------------------------------------------------------
 
+    /// <summary>Write the towar's PRIMARY barcode - the one
+    /// <see cref="ReadFirstBarcode"/> reads first.
+    ///
+    /// The previous code called <c>KodyKreskowe.Dodaj()</c>, which the Sfera
+    /// help describes as adding to the collection of ADDITIONAL barcodes
+    /// ("kolekcja dodatkowych kodow kreskowych"), and did so AFTER Zapisz,
+    /// with no argument where the documented signature takes the value. So a
+    /// written EAN did not reach the column the read prefers, and the failure
+    /// was swallowed whole - which is consistent with ReadFirstBarcode's own
+    /// observation that the collection table has 0 rows on this install.
+    ///
+    /// The vendor's own example is <c>oTw.KodyKreskowe.Podstawowy = "..."</c>
+    /// followed by <c>oTw.Zapisz</c>, so this is called BEFORE the save and
+    /// assigns the primary slot. Still best-effort, because the COM property
+    /// is only as available as the installed Sfera version - but a failure now
+    /// says so on stderr instead of vanishing.</summary>
+    private static void SetPrimaryBarcode(dynamic tw, string? ean, string symbol)
+    {
+        if (ean is not { Length: > 0 }) return;
+        try
+        {
+            tw.KodyKreskowe.Podstawowy = ean;
+        }
+        catch (Exception e)
+        {
+            Console.Error.WriteLine(
+                $"ProductsEndpoints.SetPrimaryBarcode: could not set the primary barcode for towar {symbol} - {e.Message}");
+        }
+    }
+
     private static async Task<BridgeProductDto> CreateProduct(CreateProductRequest req, string imageBase)
     {
         Sfera.Run(sub =>
@@ -533,18 +613,9 @@ public static class ProductsEndpoints
                 if (!string.IsNullOrEmpty(req.Opis)) tw.Opis = req.Opis;
                 if (req.JednostkaMiary is { Length: > 0 } jm) { try { tw.JednostkaMiary = jm; } catch { } }
                 if (req.Waga is decimal waga) { try { tw.Masa = waga; } catch { } }
+                SetPrimaryBarcode(tw, req.KodKreskowy, req.Symbol);
+                SetPriceLevelCurrency(tw, req.Waluta, req.Symbol);
                 tw.Zapisz();
-                if (req.KodKreskowy is { Length: > 0 } ean)
-                {
-                    try
-                    {
-                        dynamic kody = tw.KodyKreskowe;
-                        dynamic kod = kody.Dodaj();
-                        kod.Kod = ean;
-                        kod.Zapisz();
-                    }
-                    catch { /* best-effort - barcode collection API unconfirmed */ }
-                }
             }
             finally { try { tw.Zamknij(); } catch { } }
         }, TimeSpan.FromSeconds(60));
@@ -582,6 +653,13 @@ public static class ProductsEndpoints
                 if (req.Nazwa is { Length: > 0 } nazwa) tw.Nazwa = nazwa;
                 if (!string.IsNullOrEmpty(req.Opis)) tw.Opis = req.Opis;
                 if (req.Waga is decimal waga) { try { tw.Masa = waga; } catch { } }
+                // Both of these have always been ACCEPTED here and written
+                // neither, which is the worst of the three options: a caller's
+                // value taken, acknowledged and discarded. OpenLinker really
+                // does send both. They are written now, on the same
+                // best-effort terms as Masa above.
+                SetPrimaryBarcode(tw, req.KodKreskowy, symbol);
+                SetPriceLevelCurrency(tw, req.Waluta, symbol);
                 if (req.CenaSprzedazyBrutto is decimal cena) SetGrossPriceLevel0(tw, cena, vatRatePercent);
                 tw.Zapisz();
             }
