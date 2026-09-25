@@ -634,31 +634,6 @@ app.MapGet("/wp-json/wc/v3/system_status", () => Results.Ok(new
 // numer przesylki gubi po drodze, wiec przewoznika/paczkomat czytamy z meta_data
 // albo z pol wlasnych requestu, ktore przysle dopiero prawdziwy adapter Subiekta.
 
-/// <summary>Reads back the shipping block this bridge previously wrote, as label -> value.</summary>
-async Task<Dictionary<string, string>> ReadShippingBlock(int dokId)
-{
-    var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-    try
-    {
-        await using var c = new SqlConnection(BridgeConfig.ConnectionString);
-        await c.OpenAsync();
-        await using var cmd = new SqlCommand("SELECT dok_UwagiExt FROM dok__Dokument WHERE dok_Id = @id", c);
-        cmd.Parameters.AddWithValue("@id", dokId);
-        var raw = await cmd.ExecuteScalarAsync();
-        if (raw is null || raw is DBNull) return map;
-        foreach (var line in Convert.ToString(raw)!.Split('\n'))
-        {
-            var i = line.IndexOf(':');
-            if (i <= 0) continue;
-            var key = line[..i].Trim();
-            var val = line[(i + 1)..].Trim();
-            if (key.Length > 0 && val.Length > 0) map[key] = val;
-        }
-    }
-    catch { /* a merge is best-effort; never block the write */ }
-    return map;
-}
-
 app.MapPut("/wp-json/wc/v3/orders/{id:int}", async (int id, HttpRequest req) =>
 {
     using var doc = await System.Text.Json.JsonDocument.ParseAsync(req.Body);
@@ -717,15 +692,9 @@ app.MapPut("/wp-json/wc/v3/orders/{id:int}", async (int id, HttpRequest req) =>
 
     // Merge, never overwrite. A caller that knows only the status (the WooCommerce
     // adapter sends exactly that) must not wipe the carrier, waybill and pickup
-    // point a previous, richer call already wrote.
-    var previous = await ReadShippingBlock(id);
-    if (info.Carrier == "")     info.Carrier     = previous.GetValueOrDefault("Przewoznik", "");
-    if (info.Tracking == "")    info.Tracking    = previous.GetValueOrDefault("Nr przesylki", "");
-    if (info.PickupPoint == "") info.PickupPoint = previous.GetValueOrDefault("Punkt odbioru", "");
-    if (info.TrackingUrl == "") info.TrackingUrl = previous.GetValueOrDefault("Sledzenie", "");
-    if (info.ShipmentRef == "") info.ShipmentRef = previous.GetValueOrDefault("Przesylka OL", "");
-    if (info.OrderRef == "")    info.OrderRef    = previous.GetValueOrDefault("Zamowienie OL", "");
-    if (info.Status == "")      info.Status      = previous.GetValueOrDefault("Status", "");
+    // point a previous, richer call already wrote. Shared with the native
+    // /api/orders/{id}/shipping route, which was missing it entirely.
+    await ShippingBlockMerge.FillBlanksFromDocument(id, info);
 
     try
     {

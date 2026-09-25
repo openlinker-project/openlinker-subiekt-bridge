@@ -141,7 +141,7 @@ public static class OrdersEndpoints
 
             try
             {
-                var numer = Sfera.WriteShipping(id, new ShippingInfo
+                var info = new ShippingInfo
                 {
                     Carrier = body.Carrier ?? "",
                     Tracking = body.TrackingNumber ?? "",
@@ -150,7 +150,14 @@ public static class OrdersEndpoints
                     TrackingUrl = body.TrackingUrl ?? "",
                     ShipmentRef = body.ShipmentRef ?? "",
                     OrderRef = body.OrderRef ?? "",
-                });
+                };
+                // MERGE, never overwrite. Sfera.WriteShipping assigns both
+                // remarks fields, so without this a status-only write wiped the
+                // waybill a richer earlier write had recorded - and a
+                // shipped-then-cancelled sequence left only "Anulowane" behind.
+                // The shim route has always done this; this one did not.
+                await ShippingBlockMerge.FillBlanksFromDocument(id, info);
+                var numer = Sfera.WriteShipping(id, info);
                 return Ok(new WriteShippingResponse(numer));
             }
             catch (TimeoutException ex)

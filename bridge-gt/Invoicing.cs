@@ -260,6 +260,17 @@ public static class Invoicing
         if (autoWz is not null)
         {
             Console.Error.WriteLine($"Invoicing.EnsureWarehouseRelease: Subiekt already auto-released via {autoWz.Value.Numer} for invoice {invoiceDocId} - not creating a second WZ.");
+            // The auto-released WZ is linked to the INVOICE, not to the order,
+            // so Subiekt has no way to conclude the ZK was realized and leaves
+            // it outstanding for ever. The other branch below reaches the same
+            // end state for free via NaPodstawie(zkId); this branch cannot, so
+            // it says so explicitly. Best-effort by construction: the goods are
+            // out and the invoice exists, and neither may fail over a flag.
+            var autoZkId = zkId ?? await FindZkIdByOrderRef(orderId);
+            if (autoZkId is not null && Sfera.MarkOrderRealized(autoZkId.Value))
+            {
+                Console.Error.WriteLine($"Invoicing.EnsureWarehouseRelease: marked ZK {autoZkId.Value} realized (auto-released path).");
+            }
             return autoWz.Value.Numer;
         }
 

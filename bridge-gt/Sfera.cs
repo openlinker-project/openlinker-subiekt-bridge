@@ -307,6 +307,67 @@ public static class Sfera
     /// <summary>kh_Nazwa (short name) is nvarchar(50).</summary>
     public static string Trim50(string s) => s.Length <= 50 ? s : s.Substring(0, 50);
 
+    /// <summary>
+    /// SubiektDokumentStatusEnum.gtaSubiektDokumentStatusZrealizowany.
+    ///
+    /// The enum is shared across every document type and most of its values are
+    /// about warehouse effect, but four are about ORDERS specifically: 5
+    /// (niezrealizowane), 6 (bez rezerwacji), 7 (zarezerwowany) and 8
+    /// (zrealizowane) all say "Dotyczy dokumentow typu Zamowienie (ZM, ZK i ZD)"
+    /// in the GT Sfera help (SubiektDokumentStatusEnum.htm).
+    ///
+    /// Do NOT reach for the same-named enum in the `sfera-api-main` dump lying
+    /// around locally - that is Subiekt NEXO (InsERT.Moria.*, no SuDokument at
+    /// all) and proves nothing about GT.
+    /// </summary>
+    private const int ZamowienieZrealizowane = 8;
+
+    /// <summary>
+    /// Marks a ZK as realized (dok_Status = 8).
+    ///
+    /// WHY THIS EXISTS. Subiekt derives an order's realization from the
+    /// documents linked to it, and OpenLinker's invoice is created standalone
+    /// (DodajFS, not from the order), so nothing links back. On an install
+    /// where the document type is set to release stock automatically, the
+    /// auto-WZ is linked to the INVOICE rather than to the ZK - confirmed on a
+    /// live database: every recent WZ carries dok_DoDokId pointing at an FS/PA,
+    /// every recent FS carries none, and 33 of 38 ZKs sat at status 6 having in
+    /// fact been invoiced and shipped. An operator opening Subiekt saw a pile
+    /// of outstanding orders that were all long since fulfilled.
+    ///
+    /// The other branch of EnsureWarehouseRelease already calls
+    /// NaPodstawie(zkId), and those ZKs DO reach 8 on their own - so this is
+    /// the same end state Subiekt itself writes, reached explicitly on the one
+    /// path where Subiekt cannot reach it.
+    ///
+    /// Returns false rather than throwing: an order whose goods have shipped
+    /// and whose invoice exists must not have that invoice fail over a status
+    /// flag.
+    /// </summary>
+    public static bool MarkOrderRealized(int zkId)
+    {
+        var ok = false;
+        try
+        {
+            Run(sub =>
+            {
+                dynamic d = sub.SuDokumentyManager.WczytajDokument(zkId);
+                try
+                {
+                    d.StatusDokumentu = ZamowienieZrealizowane;
+                    d.Zapisz();
+                    ok = true;
+                }
+                finally { try { d.Zamknij(); } catch { } }
+            }, TimeSpan.FromSeconds(60));
+        }
+        catch (Exception e)
+        {
+            Console.Error.WriteLine($"Sfera.MarkOrderRealized: could not mark ZK {zkId} realized: {e.Message}");
+        }
+        return ok;
+    }
+
     /// <summary>Writes the shipping block onto a Subiekt document (ZK/FS/...).</summary>
     public static string WriteShipping(int dokId, ShippingInfo s)
     {
