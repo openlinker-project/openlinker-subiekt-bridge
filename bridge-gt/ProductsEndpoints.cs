@@ -153,9 +153,17 @@ public static class ProductsEndpoints
     /// page of MODELS, and a naive join-then-skip would cut a model in half and
     /// report a group missing members it has.
     ///
-    /// The join to tw__Towar is INNER and filters tw_Usuniety, so a model whose
-    /// every member has been deleted simply does not appear - it cannot be a
-    /// product, and reporting it empty would invite a caller to create one.</summary>
+    /// A model whose every member has been deleted does not appear - it cannot
+    /// be a product, and reporting it empty would invite a caller to create one.
+    ///
+    /// That filter lives INSIDE the paged relation (the EXISTS below), never on
+    /// the join outside it, and the distinction is the whole correctness of this
+    /// route. OpenLinker's readPagedIds infers end-of-catalogue from a page
+    /// shorter than the size it asked for, so a filter applied AFTER OFFSET/FETCH
+    /// silently shortens a page that is not the last one: the caller stops, and
+    /// every model past that point is reported as a separate standalone product
+    /// for as long as the emptied model exists. Mirrors ListSymbols below, which
+    /// has always filtered inside its own paged read.</summary>
     private static async Task<List<BridgeModelSummaryDto>> ListModels(int limit, int offset)
     {
         await using var c = new SqlConnection(ConnStr);
@@ -163,6 +171,10 @@ public static class ProductsEndpoints
         await using var cmd = new SqlCommand(
             @"SELECT m.mdt_Id, m.mdt_Nazwa, t.tw_Symbol
               FROM (SELECT mdt_Id, mdt_Nazwa FROM sl_ModelTw
+                    WHERE EXISTS (SELECT 1 FROM sl_ModelTowar mt2
+                                  JOIN tw__Towar t2 ON t2.tw_Id = mt2.mtw_IdTowar
+                                                   AND t2.tw_Usuniety = 0
+                                  WHERE mt2.mtw_IdModel = sl_ModelTw.mdt_Id)
                     ORDER BY mdt_Id OFFSET @off ROWS FETCH NEXT @lim ROWS ONLY) m
               JOIN sl_ModelTowar mt ON mt.mtw_IdModel = m.mdt_Id
               JOIN tw__Towar t ON t.tw_Id = mt.mtw_IdTowar AND t.tw_Usuniety = 0
