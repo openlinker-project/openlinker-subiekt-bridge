@@ -254,23 +254,52 @@ public static class Invoicing
     /// (OrdersEndpoints.cs's FindExistingZk, keyed on req.OrderRef) - a
     /// different field entirely. `zkId` absent (order-less/manual invoice,
     /// or a pre-fix mapping) falls back to that search unchanged.</summary>
+    /// <summary>
+    /// Marks the order realized once its goods have left, whichever way they left.
+    ///
+    /// WHY AT THE CALL SITE. Subiekt derives an order's realization from the
+    /// documents linked to it, and OpenLinker's invoice is created standalone,
+    /// so nothing links back. There are two ways the stock can move, and only
+    /// one of them reaches EnsureWarehouseRelease at all:
+    ///
+    ///   - the invoice already carries a stock movement (dok_JestRuchMag = 1),
+    ///     because the document type is set to release automatically. The call
+    ///     sites SHORT-CIRCUIT on that, so nothing inside EnsureWarehouseRelease
+    ///     ever runs. This is the common configuration, verified live: FS 38 and
+    ///     FS 39 both carry JestRuchMag = 1 with an auto-WZ linked to the FS
+    ///     rather than to the ZK, and both left their ZK at status 6.
+    ///   - this bridge wrote the WZ itself with NaPodstawie(zkId), which links
+    ///     the documents and lets Subiekt conclude realization on its own.
+    ///
+    /// Calling it here covers both, and is idempotent: setting status 8 twice
+    /// is 8. Best-effort by construction - the goods are out and the invoice
+    /// exists, and neither may fail over a flag.
+    /// </summary>
+    private static async Task MarkOrderRealizedBestEffort(string orderId, int? zkId)
+    {
+        var resolved = zkId ?? await FindZkIdByOrderRef(orderId);
+        if (resolved is null)
+        {
+            return;
+        }
+        if (Sfera.MarkOrderRealized(resolved.Value))
+        {
+            Console.Error.WriteLine($"Invoicing: marked ZK {resolved.Value} realized for order '{orderId}'.");
+        }
+    }
+
     private static async Task<string?> EnsureWarehouseRelease(string orderId, string key, int invoiceDocId, int? zkId = null, List<InvoiceLine>? lines = null)
     {
         var autoWz = await FindAutoReleasedWzForInvoice(invoiceDocId);
         if (autoWz is not null)
         {
             Console.Error.WriteLine($"Invoicing.EnsureWarehouseRelease: Subiekt already auto-released via {autoWz.Value.Numer} for invoice {invoiceDocId} - not creating a second WZ.");
-            // The auto-released WZ is linked to the INVOICE, not to the order,
-            // so Subiekt has no way to conclude the ZK was realized and leaves
-            // it outstanding for ever. The other branch below reaches the same
-            // end state for free via NaPodstawie(zkId); this branch cannot, so
-            // it says so explicitly. Best-effort by construction: the goods are
-            // out and the invoice exists, and neither may fail over a flag.
-            var autoZkId = zkId ?? await FindZkIdByOrderRef(orderId);
-            if (autoZkId is not null && Sfera.MarkOrderRealized(autoZkId.Value))
-            {
-                Console.Error.WriteLine($"Invoicing.EnsureWarehouseRelease: marked ZK {autoZkId.Value} realized (auto-released path).");
-            }
+            // NOTE: marking the ZK realized is NOT done here. It belongs at the
+            // CALL SITE, because this whole method is skipped when the invoice
+            // already carries a stock movement (DocumentCarriesStockMovement) -
+            // which is exactly the auto-releasing install that needs the mark.
+            // Putting it here made it dead code on the one configuration it was
+            // written for. See MarkOrderRealizedBestEffort.
             return autoWz.Value.Numer;
         }
 
@@ -365,6 +394,7 @@ public static class Invoicing
                 var wzNumerExisting = await DocumentCarriesStockMovement(exId)
                     ? null
                     : await EnsureWarehouseRelease(req.OrderId, key, exId, req.ZkId, req.Lines);
+                await MarkOrderRealizedBestEffort(req.OrderId, req.ZkId);
                 return new IssueResult(exId, exNumer, "issued", regStatus, null, ksefNr, wzNumerExisting);
             }
 
@@ -484,6 +514,7 @@ public static class Invoicing
             var wzNumer = await DocumentCarriesStockMovement(docId)
                 ? null
                 : await EnsureWarehouseRelease(req.OrderId, key, docId, req.ZkId, req.Lines);
+            await MarkOrderRealizedBestEffort(req.OrderId, req.ZkId);
             return new IssueResult(docId, numer, "issued", finalRegStatus, null, finalKsefNr, wzNumer);
         });
     }
