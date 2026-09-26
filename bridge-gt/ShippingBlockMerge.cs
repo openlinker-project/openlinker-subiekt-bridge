@@ -1,0 +1,65 @@
+// ShippingBlockMerge - read back what this bridge previously wrote onto a
+// document's remarks, so a later write ADDS to it instead of replacing it.
+//
+// WHY IT MOVED HERE. Sfera.WriteShipping ASSIGNS both d.Uwagi and d.UwagiExt.
+// That is correct only for a caller that knows every field. Two callers do not:
+//
+//   - the WooCommerce shim route in Program.cs, which had this merge inline and
+//     worked;
+//   - the native PUT /api/orders/{id}/shipping route, which did NOT, and so
+//     destroyed the previous status on every write. An order that went
+//     "shipped" and then "cancelled" ended up carrying only "Anulowane", with
+//     no trace that a waybill had ever been recorded.
+//
+// One copy, two callers. The shim's version is gone; this is the same code.
+//
+// Keys are the Polish labels ShippingInfo.Block() emits - the two halves are a
+// matched pair and must be edited together. A label renamed on one side and not
+// the other silently stops merging that field, which looks exactly like the
+// defect this file exists to fix.
+using Microsoft.Data.SqlClient;
+
+public static class ShippingBlockMerge
+{
+    /// <summary>Reads back the shipping block previously written, as label -> value.</summary>
+    public static async Task<Dictionary<string, string>> Read(int dokId)
+    {
+        var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            await using var c = new SqlConnection(BridgeConfig.ConnectionString);
+            await c.OpenAsync();
+            await using var cmd = new SqlCommand("SELECT dok_UwagiExt FROM dok__Dokument WHERE dok_Id = @id", c);
+            cmd.Parameters.AddWithValue("@id", dokId);
+            var raw = await cmd.ExecuteScalarAsync();
+            if (raw is null || raw is DBNull) return map;
+            foreach (var line in Convert.ToString(raw)!.Split('\n'))
+            {
+                var i = line.IndexOf(':');
+                if (i <= 0) continue;
+                var key = line[..i].Trim();
+                var val = line[(i + 1)..].Trim();
+                if (key.Length > 0 && val.Length > 0) map[key] = val;
+            }
+        }
+        catch { /* a merge is best-effort; never block the write */ }
+        return map;
+    }
+
+    /// <summary>
+    /// Fills every field the caller left blank from what the document already
+    /// carries. Never the other way round: a value the caller DID supply always
+    /// wins, so this cannot pin a stale waybill onto a fresh one.
+    /// </summary>
+    public static async Task FillBlanksFromDocument(int dokId, ShippingInfo info)
+    {
+        var previous = await Read(dokId);
+        if (info.Carrier == "")     info.Carrier     = previous.GetValueOrDefault("Przewoznik", "");
+        if (info.Tracking == "")    info.Tracking    = previous.GetValueOrDefault("Nr przesylki", "");
+        if (info.PickupPoint == "") info.PickupPoint = previous.GetValueOrDefault("Punkt odbioru", "");
+        if (info.TrackingUrl == "") info.TrackingUrl = previous.GetValueOrDefault("Sledzenie", "");
+        if (info.ShipmentRef == "") info.ShipmentRef = previous.GetValueOrDefault("Przesylka OL", "");
+        if (info.OrderRef == "")    info.OrderRef    = previous.GetValueOrDefault("Zamowienie OL", "");
+        if (info.Status == "")      info.Status      = previous.GetValueOrDefault("Status", "");
+    }
+}
