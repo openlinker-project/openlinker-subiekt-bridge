@@ -37,3 +37,13 @@ They do NOT need Subiekt, SQL Server, or a running bridge.
 
 Neither bridge in this repository has CI. These tests are a gate somebody runs,
 not one that runs itself - stated here rather than implied by their existence.
+
+## Deploying the /gt-image gate
+
+Signing image URLs (#3365) invalidates every URL OpenLinker stored before the
+gate existed - they carry no signature and answer 404 once it is deployed.
+
+It self-heals on the next catalogue sweep (20 minutes at the default cadence)
+and nothing already published to a marketplace is affected, because
+marketplaces copy the bytes rather than hot-linking. To skip the window,
+trigger a product sweep straight after deploying.

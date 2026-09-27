@@ -25,6 +25,26 @@
 // What it removes is the ability to walk 1..N and take the whole catalogue from
 // outside.
 //
+// UPGRADING BREAKS ALREADY-STORED URLs, and that is not avoidable here.
+//
+// OpenLinker stores the image URL it was given at sync time. Every URL stored
+// before this shipped carries no signature, so the moment the gate is deployed
+// those URLs answer 404 - observed on the verification stand, where a spec
+// asserting "a product image URL loads FROM A BROWSER" went red against a URL
+// synced an hour earlier.
+//
+// It self-heals: the catalogue sweep rewrites `imageUrls` on its next cycle
+// (20 minutes at the default cadence), and nothing already PUBLISHED to a
+// marketplace is affected, because marketplaces copy the bytes at publish time
+// rather than hot-linking. What breaks in between is OpenLinker's own
+// thumbnails and any offer published inside that window.
+//
+// An operator who cannot accept that window should trigger a product sweep
+// straight after deploying the bridge. There is no version of a gate on a URL
+// that leaves URLs already in circulation working - a grace period that served
+// unsigned requests would be a door held open on exactly the enumeration this
+// closes, with no way to tell when it was safe to shut.
+//
 // UNSIGNED REQUESTS ARE STILL SERVED when no secret is configured. A bridge
 // with no token has no secret to sign with, and refusing there would black out
 // every image on an install that was working a moment ago - the token gate
