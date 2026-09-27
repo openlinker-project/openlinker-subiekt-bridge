@@ -40,6 +40,36 @@ public static class InventoryEndpoints
 
     public static void MapInventoryEndpoints(this WebApplication app)
     {
+        // #3365 - the operator has no other way to learn a valid magazyn id.
+        //
+        // `config.stockMagazynId` decides which warehouse's stock OpenLinker
+        // publishes and which one a document releases from, and until now the
+        // ONLY way to find a correct value was to open SQL Server and read
+        // sl_Magazyn by hand: the connection wizard does not ask for it and no
+        // route listed the choices. That is also what made the adapter unable
+        // to tell a mistyped id from a towar simply not stocked in the chosen
+        // warehouse, so it refused BOTH with a terminal error.
+        //
+        // Read-only, and deliberately unfiltered: sl_Magazyn holds the
+        // seller's own warehouses only (live DEMO: 2 rows).
+        app.MapGet("/api/warehouses", async () =>
+        {
+            await using var c = new SqlConnection(BridgeConfig.ConnectionString);
+            await c.OpenAsync();
+            await using var cmd = new SqlCommand(
+                "SELECT mag_Id, mag_Symbol, mag_Nazwa FROM sl_Magazyn ORDER BY mag_Id", c);
+            await using var r = await cmd.ExecuteReaderAsync();
+            var list = new List<object>();
+            while (await r.ReadAsync())
+                list.Add(new
+                {
+                    id = r.GetInt32(0),
+                    symbol = r.IsDBNull(1) ? null : r.GetString(1).Trim(),
+                    nazwa = r.IsDBNull(2) ? null : r.GetString(2).Trim(),
+                });
+            return Ok(new { warehouses = list });
+        });
+
         app.MapGet("/api/inventory/{towarSymbol}/stock", async (string towarSymbol) =>
         {
             // #3371 fix: a null result now means "towar doesn't exist, or is
@@ -206,7 +236,12 @@ public static class InventoryEndpoints
                 dynamic d = req.Delta > 0 ? mgr.DodajPW() : mgr.DodajRW();
                 try
                 {
-                    try { d.MagazynId = magazynId; } catch { }
+                    // #3365 - no longer swallowed. An adjustment that lands
+                    // in a different warehouse than the caller named moves
+                    // real stock in the wrong place, which is exactly the
+                    // silent mismatch this wave removes elsewhere; the empty
+                    // catch here was where the pattern came from.
+                    DocumentWarehouse.Apply(d, magazynId, "PW/RW");
                     dynamic poz = d.Pozycje.Dodaj(req.TowarSymbol);
                     poz.IloscJm = Math.Abs(req.Delta);
 

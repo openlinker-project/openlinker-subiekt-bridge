@@ -17,16 +17,18 @@
 // *** NOT LIVE-VERIFIED - built with no access to run dotnet/sqlcmd on this
 // machine (sandboxed worktree). Three things below are UNCONFIRMED and must be
 // checked before first real use: ***
-//   1. DokDataKolumna (the watermark date column name) - a guess. Verify with:
-//      SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
-//      WHERE TABLE_NAME='dok__Dokument' AND COLUMN_NAME LIKE 'dok_Data%'
-//      and correct the constant below if it isn't dok_DataWyst.
-//   2. The ZK filter uses dok_NrPelny LIKE 'ZK %' rather than a dok_Typ code
-//      (deliberately - Invoicing.cs never established ZK's numeric dok_Typ,
-//      while 'ZK 18/2026'-style numbering IS confirmed live in this DB from the
-//      #753 invoicing E2E run). Prefer switching to dok_Typ once confirmed via:
-//      SELECT DISTINCT dok_Typ FROM dok__Dokument WHERE dok_NrPelny LIKE 'ZK %'
-//      (a numeric-code filter is index-friendlier than a LIKE on dok_NrPelny).
+//   1. DokDataKolumna (the watermark date column name) - CONFIRMED (#3365).
+//      INFORMATION_SCHEMA lists dok_DataWyst on dok__Dokument; the guess was
+//      right.
+//   2. The ZK filter - RESOLVED (#3365). It used dok_NrPelny LIKE 'ZK %'
+//      because the numeric dok_Typ had never been established. The query this
+//      note prescribed was run against the live DEMO database and answered
+//      ZK = 16, one code, 41 rows. All five sites in this project now share
+//      DocumentTypes.Zk. That matters more than index-friendliness: the LIKE
+//      pattern matches a rendered, OPERATOR-EDITABLE numbering template and
+//      needs a literal space, so on a customer numbering `ZK/18/2026` it
+//      matched nothing and the idempotency guard below silently minted a
+//      duplicate ZK on every retry.
 //   3. The line-items table/columns (pd__Pozycja, tw_Symbol/tw_Nazwa/pd_Ilosc/
 //      pd_WartoscBrutto, pd_DokumentId, pd_TowarId, dok_KontrahentId) follow this
 //      DB's double-underscore naming convention (dok__Dokument/kh__Kontrahent/
@@ -286,7 +288,7 @@ public static class OrdersEndpoints
         await using var c = new SqlConnection(ConnStr);
         await c.OpenAsync();
         await using var cmd = new SqlCommand(
-            "SELECT TOP 1 dok_Id, dok_NrPelny FROM dok__Dokument WHERE dok_NrPelnyOryg = @k AND dok_NrPelny LIKE 'ZK %'", c);
+            $"SELECT TOP 1 dok_Id, dok_NrPelny FROM dok__Dokument WHERE dok_NrPelnyOryg = @k AND dok_Typ = {DocumentTypes.Zk}", c);
         cmd.Parameters.AddWithValue("@k", Trim30(orderRef));
         await using var r = await cmd.ExecuteReaderAsync();
         if (!await r.ReadAsync()) return null;
@@ -307,7 +309,7 @@ public static class OrdersEndpoints
         await c.OpenAsync();
         var sql = $@"SELECT TOP (@limit) dok_Id, dok_NrPelny, {DokDataKolumna}
                      FROM dok__Dokument
-                     WHERE dok_NrPelny LIKE 'ZK %'
+                     WHERE dok_Typ = {DocumentTypes.Zk}
                        AND (@since IS NULL OR {DokDataKolumna} > @since)
                      ORDER BY {DokDataKolumna} ASC";
         await using var cmd = new SqlCommand(sql, c);

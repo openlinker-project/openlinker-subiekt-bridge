@@ -144,6 +144,9 @@ public static class FiscalizationEndpoints
                         // creation, available since GT 1.12
                         // (Pomoc/gta.chm/SuDokumentyManager_DodajPAf.htm).
                         dynamic d = mgr.DodajPAf();
+                        // #3365 - a fiscal receipt moves stock like any other
+                        // sale document, so it names its warehouse too.
+                        DocumentWarehouse.Apply(d, body.MagazynId, "PAf");
                         try
                         {
                             d.LiczonyOdCenBrutto = true;
@@ -308,6 +311,9 @@ public sealed class FiscalizeRequest
     public List<FiscalizeLine> Lines { get; set; } = new();
     public int? StanowiskoKasoweId { get; set; }
     public int DrukarkaFiskalnaId { get; set; }
+    /// <summary>#3365 - the warehouse this receipt releases from. Null keeps
+    /// the pre-#3365 behaviour: the Sfera session decides.</summary>
+    public int? MagazynId { get; set; }
 }
 
 public sealed record FiscalizeResponse(int DocumentId, string DocumentNumber, string Status, int? RawStatusFiskalny);

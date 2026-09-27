@@ -1,4 +1,4 @@
-// OpenLinker <- Subiekt GT spike bridge.
+﻿// OpenLinker <- Subiekt GT spike bridge.
 // Speaks a READ-ONLY subset of the WooCommerce REST v3 dialect so the shipped
 // OpenLinker WooCommerce ProductMaster/InventoryMaster adapters can consume
 // Subiekt GT without any change to OpenLinker itself.
@@ -400,22 +400,26 @@ app.MapGet("/wp-json/wc/v3/products/{pid:int}/variations/{vid:int}", async (int 
 // --- ZAMOWIENIA: dokumenty ZK z Subiekta jako zamowienia WooCommerce ----------
 // GT nie ma znacznika modyfikacji dokumentu, wiec date_modified jest syntetyczna:
 // data wystawienia + numer dokumentu w sekundach. Monotoniczna, co wystarcza kursorowi.
-// #6-review fix: this used to filter `d.dok_Typ = 16`, an UNCONFIRMED numeric
-// code that OrdersEndpoints.cs's own file header and Invoicing.cs both
-// explicitly say was never established live - both of those instead filter
-// `dok_NrPelny LIKE 'ZK %'`, which IS confirmed live (#753's invoicing E2E
-// run). Two different filters for "is this a ZK" inside the SAME diff meant
-// the WC-shim order routes could silently match the wrong rows (or none) on
-// a real install where 16 turns out not to be ZK's code. Aligned to the
-// confirmed-live filter rather than the unconfirmed one.
-const string OrderSelect = @"
+// #3365: back to `dok_Typ`, now MEASURED rather than assumed.
+//
+// A #6 review moved this off `dok_Typ = 16` because that code "was never
+// established live", and aligned it with the `dok_NrPelny LIKE 'ZK %'` filter
+// the other two files used. Aligning them was right; the target was not. That
+// pattern matches a rendered, OPERATOR-EDITABLE numbering template and needs a
+// literal space, so on a customer numbering `ZK/18/2026` it matches nothing and
+// every one of these routes answers empty with HTTP 200.
+//
+// The query the header itself prescribed was finally run (see DocumentTypes.cs):
+// ZK is 16, one code, 41 rows, no overlap with any other prefix. All five sites
+// now share that one constant.
+string OrderSelect = $@"
 SELECT  d.dok_Id, d.dok_NrPelny, d.dok_DataWyst, d.dok_WartBrutto, d.dok_Status,
         k.kh_Id, k.kh_Symbol, k.kh_EMail,
         a.adr_Nazwa, a.adr_Ulica, a.adr_NrDomu, a.adr_Kod, a.adr_Miejscowosc, a.adr_NIP, a.adr_Telefon
 FROM    dok__Dokument d
 LEFT JOIN kh__Kontrahent k ON k.kh_Id = d.dok_PlatnikId
 OUTER APPLY (SELECT TOP 1 * FROM adr__Ewid WHERE adr_IdObiektu = k.kh_Id AND adr_TypAdresu = 1) a
-WHERE   d.dok_NrPelny LIKE 'ZK %'
+WHERE   d.dok_Typ = {DocumentTypes.Zk}
 ";
 
 static string Iso(DateTime d, int id) => d.Date.AddSeconds(id).ToString("yyyy-MM-ddTHH:mm:ss");

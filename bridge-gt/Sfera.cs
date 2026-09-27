@@ -251,6 +251,12 @@ public static class Sfera
             dynamic d = sub.SuDokumentyManager.DodajZK();
             try
             {
+                // #3365 - name the warehouse. A ZK reserves nothing here
+                // (Rezerwacja is deliberately false, below), so this is not a
+                // stock movement - but it IS what the WZ later derives from
+                // via NaPodstawie, and a ZK in one warehouse followed by a
+                // release from another is the mismatch this change removes.
+                DocumentWarehouse.Apply(d, req.MagazynId, "ZK");
                 d.KontrahentId = req.KontrahentId;
                 d.LiczonyOdCenBrutto = true;          // marketplace prices are gross
                 // The buyer-paid figures below are denominated in the SOURCE's
@@ -577,4 +583,7 @@ public sealed class ZkRequest
     /// written to SuDokument.WalutaSymbol so a foreign-currency order is not
     /// silently booked as though its figures were zlotys.</summary>
     public string Waluta = "";
+    /// <summary>#3365 - the warehouse this order will be released from. Null
+    /// keeps the pre-#3365 behaviour: the Sfera session decides.</summary>
+    public int? MagazynId;
 }

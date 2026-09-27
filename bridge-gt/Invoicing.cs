@@ -169,13 +169,29 @@ public static class Invoicing
     /// the order actually reserved. Filtered by 'ZK %' rather than a dok_Typ
     /// code for the same unconfirmed-numeric-code reason FindExistingZk is
     /// (see OrdersEndpoints.cs file header note 2).</summary>
+    /// <summary>#3365 - which warehouse a document was written in.
+    ///
+    /// Used to make a korekta land where its original sale left from, rather
+    /// than wherever the Sfera session happens to default to. Null when the
+    /// document carries none, which keeps the pre-#3365 behaviour.</summary>
+    private static async Task<int?> ReadDocumentMagazynId(int docId)
+    {
+        await using var c = new SqlConnection(ConnStr);
+        await c.OpenAsync();
+        await using var cmd = new SqlCommand(
+            "SELECT dok_MagId FROM dok__Dokument WHERE dok_Id = @id", c);
+        cmd.Parameters.AddWithValue("@id", docId);
+        var r = await cmd.ExecuteScalarAsync();
+        return r is null || r is DBNull ? null : Convert.ToInt32(r);
+    }
+
     private static async Task<int?> FindZkIdByOrderRef(string orderRef)
     {
         if (orderRef == "") return null;
         await using var c = new SqlConnection(ConnStr);
         await c.OpenAsync();
         await using var cmd = new SqlCommand(
-            "SELECT TOP 1 dok_Id FROM dok__Dokument WHERE dok_NrPelnyOryg = @k AND dok_NrPelny LIKE 'ZK %' ORDER BY dok_Id DESC", c);
+            $"SELECT TOP 1 dok_Id FROM dok__Dokument WHERE dok_NrPelnyOryg = @k AND dok_Typ = {DocumentTypes.Zk} ORDER BY dok_Id DESC", c);
         cmd.Parameters.AddWithValue("@k", Trim30(orderRef));
         var r = await cmd.ExecuteScalarAsync();
         return r is null || r is DBNull ? null : Convert.ToInt32(r);
@@ -190,7 +206,7 @@ public static class Invoicing
         await using var c = new SqlConnection(ConnStr);
         await c.OpenAsync();
         await using var cmd = new SqlCommand(
-            "SELECT TOP 1 dok_Id, dok_NrPelny FROM dok__Dokument WHERE dok_NrPelnyOryg = @k AND dok_NrPelny LIKE 'WZ %' ORDER BY dok_Id DESC", c);
+            $"SELECT TOP 1 dok_Id, dok_NrPelny FROM dok__Dokument WHERE dok_NrPelnyOryg = @k AND dok_Typ = {DocumentTypes.Wz} ORDER BY dok_Id DESC", c);
         cmd.Parameters.AddWithValue("@k", ReduceIdempotencyKey(key));
         await using var r = await cmd.ExecuteReaderAsync();
         if (!await r.ReadAsync()) return null;
@@ -288,7 +304,7 @@ public static class Invoicing
         }
     }
 
-    private static async Task<string?> EnsureWarehouseRelease(string orderId, string key, int invoiceDocId, int? zkId = null, List<InvoiceLine>? lines = null)
+    private static async Task<string?> EnsureWarehouseRelease(string orderId, string key, int invoiceDocId, int? zkId = null, List<InvoiceLine>? lines = null, int? magazynId = null)
     {
         var autoWz = await FindAutoReleasedWzForInvoice(invoiceDocId);
         if (autoWz is not null)
@@ -327,6 +343,9 @@ public static class Invoicing
             dynamic wz = mgr.DodajWZ();
             try
             {
+                // The release is the movement that actually leaves the shelf,
+                // so if any document must name its warehouse it is this one.
+                DocumentWarehouse.Apply(wz, magazynId, "WZ");
                 wz.NaPodstawie(resolvedZkId.Value);
                 // NaPodstawie LINKS the WZ to the ZK; it does not copy the
                 // ZK's specification onto it (confirmed live: every WZ written
@@ -393,7 +412,7 @@ public static class Invoicing
                 // found invoice means its stock was already released too.
                 var wzNumerExisting = await DocumentCarriesStockMovement(exId)
                     ? null
-                    : await EnsureWarehouseRelease(req.OrderId, key, exId, req.ZkId, req.Lines);
+                    : await EnsureWarehouseRelease(req.OrderId, key, exId, req.ZkId, req.Lines, req.MagazynId);
                 await MarkOrderRealizedBestEffort(req.OrderId, req.ZkId);
                 return new IssueResult(exId, exNumer, "issued", regStatus, null, ksefNr, wzNumerExisting);
             }
@@ -431,6 +450,7 @@ public static class Invoicing
                 dynamic d = req.DocumentType == "PA" ? mgr.DodajPA() : mgr.DodajFS();
                 try
                 {
+                DocumentWarehouse.Apply(d, req.MagazynId, req.DocumentType);
                 // A PARAGON DOES NOT KEEP A CUSTOMER, and that is Subiekt's
                 // rule rather than a gap here. Probed live on 2026-09-23: set
                 // KontrahentId=79 on a DodajPA() document, read it straight
@@ -513,7 +533,7 @@ public static class Invoicing
             // EnsureWarehouseRelease's idempotency check makes the retry safe).
             var wzNumer = await DocumentCarriesStockMovement(docId)
                 ? null
-                : await EnsureWarehouseRelease(req.OrderId, key, docId, req.ZkId, req.Lines);
+                : await EnsureWarehouseRelease(req.OrderId, key, docId, req.ZkId, req.Lines, req.MagazynId);
             await MarkOrderRealizedBestEffort(req.OrderId, req.ZkId);
             return new IssueResult(docId, numer, "issued", finalRegStatus, null, finalKsefNr, wzNumer);
         });
@@ -609,10 +629,17 @@ public static class Invoicing
             // what to do - typically POST /api/inventory/adjust, the
             // confirmed-live PW/RW primitive, for exactly the returned amount.
             var quantityDeltas = new List<CorrectionQuantityDelta>();
+            var origMagazynId = await ReadDocumentMagazynId(origId);
             Sfera.Run(sub =>
             {
                 dynamic mgr = sub.SuDokumentyManager;
                 dynamic d = mgr.DodajKFS();
+                // A korekta moves stock back in, so it names a warehouse for
+                // the same reason the FS did - and it is taken from the
+                // ORIGINAL document rather than from the request, because a
+                // return must land where the sale left from. Read before this
+                // lambda, since Sfera.Run is synchronous.
+                DocumentWarehouse.Apply(d, origMagazynId, "KFS");
                 try
                 {
                     // THE LINK: NaPodstawie(origId) both stamps DoDokumentuId and
@@ -674,12 +701,22 @@ public static class Invoicing
     {
         await using var c = new SqlConnection(ConnStr);
         await c.OpenAsync();
-        // rb_Status is CHAR, not the int this file first guessed, and every row in
-        // this demo DB carries the same value - so filtering on it would either
-        // error (bad implicit conversion) or hide every account. List them all.
+        // #3365 - filter by OWNER. The previous attempt reached for rb_Status
+        // (a CHAR carrying one value across the whole table), concluded no
+        // filter was possible, and listed everything. The discriminator is
+        // rb_TypObiektu, measured on the live DEMO database on 2026-09-27:
+        //
+        //   rb_TypObiektu = 0 ->  4 rows - the SELLER's own accounts
+        //   rb_TypObiektu = 1 -> 43 rows - the seller's KONTRAHENTS' accounts
+        //   rb_TypObiektu = 3 ->  4 rows - neither
+        //
+        // So the operator's picker was offering 51 accounts of which 43 belong
+        // to their own customers, and choosing one stamps it onto a transfer
+        // invoice as the account the buyer should pay INTO. The sibling nexo
+        // bridge documents the same requirement for the same table.
         await using var cmd = new SqlCommand(
             @"SELECT rb_Id, rb_Nazwa, rb_Numer, rb_Bank, rb_Podstawowy, rb_IdObiektu
-              FROM rb__RachBankowy ORDER BY rb_Id", c);
+              FROM rb__RachBankowy WHERE rb_TypObiektu = 0 ORDER BY rb_Id", c);
         await using var r = await cmd.ExecuteReaderAsync();
         var list = new List<BankAccountRow>();
         while (await r.ReadAsync())
@@ -697,6 +734,13 @@ public static class Invoicing
     {
         await using var c = new SqlConnection(ConnStr);
         await c.OpenAsync();
+        // NO owner filter here, and that is a finding rather than an omission
+        // (#3365). Unlike rb__RachBankowy above, dks_Kasa carries no owner axis
+        // at all - INFORMATION_SCHEMA lists 16 columns and none of them is a
+        // TypObiektu / IdObiektu / Oddzial. Every till in this table belongs to
+        // the seller (live DEMO: 2 rows, KAS "Kasa glowna" and KAP "Kasa
+        // pomocnicza"), so listing them all is correct. `ks_Glowna` marks the
+        // default one if a caller ever needs to pre-select.
         await using var cmd = new SqlCommand(
             "SELECT ks_Id, ks_Nazwa, ks_Symbol FROM dks_Kasa ORDER BY ks_Id", c);
         await using var r = await cmd.ExecuteReaderAsync();
@@ -899,6 +943,37 @@ public sealed class InvoiceLine
     public string? Name;
 }
 
+/// <summary>#3365 - set the warehouse a document moves stock in, or REFUSE.
+///
+/// The one pre-existing `MagazynId =` assignment in this project (the PW/RW
+/// adjust) swallowed its failure in an empty catch. That is the wrong
+/// direction here: a warehouse that could not be set means the document lands
+/// in whichever one the Sfera session defaults to, which is precisely the
+/// silent mismatch this change exists to remove. A caller that NAMED a
+/// warehouse and did not get it must be told.
+///
+/// A null id is not a failure - it means the caller expressed no preference,
+/// and the session decides exactly as it did before.
+/// </summary>
+internal static class DocumentWarehouse
+{
+    public static void Apply(dynamic document, int? magazynId, string what)
+    {
+        if (magazynId is not int id) return;
+        try
+        {
+            document.MagazynId = id;
+        }
+        catch (Exception e)
+        {
+            throw new InvalidOperationException(
+                $"Nie udalo sie ustawic magazynu {id} na dokumencie ({what}): {e.Message}. " +
+                "Dokument zostalby wystawiony w magazynie domyslnym sesji Sfery, co rozjezdza " +
+                "publikowany stan z faktycznym wydaniem.", e);
+        }
+    }
+}
+
 public sealed class IssueRequest
 {
     public string DocumentType = "FV";
@@ -915,6 +990,21 @@ public sealed class IssueRequest
     /// docblock. Null (order-less/manual invoice, or a pre-fix caller) falls
     /// back to the pre-existing FindZkIdByOrderRef(OrderId) search.</summary>
     public int? ZkId;
+    /// <summary>#3365 - which warehouse this sale releases from.
+    ///
+    /// Until now NOTHING in this project set a warehouse on ANY document: the
+    /// only `MagazynId =` assignment in the whole bridge was the PW/RW
+    /// adjustment. Every FS, PA, WZ, KFS and ZK took whatever the Sfera SESSION
+    /// happened to default to, while `config.stockMagazynId` on the OpenLinker
+    /// side steered only the stock READ. On a two-warehouse install that means
+    /// publishing one warehouse's figure and shipping out of another - a silent
+    /// oversell with every counter internally consistent. The live DEMO
+    /// database has two magazyny with stock in both, so this is not
+    /// hypothetical; the two currently agree only because the session default
+    /// happens to be the same one.
+    ///
+    /// Null keeps the pre-#3365 behaviour exactly - the session decides.</summary>
+    public int? MagazynId;
 }
 
 public sealed record IssueResult(int ProviderInvoiceId, string ProviderInvoiceNumber, string State, string RegulatoryStatus, string? PdfUrl, string? KsefNumer = null, string? WarehouseReleaseNumber = null);
