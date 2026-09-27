@@ -189,11 +189,11 @@ string TaxClass(decimal? rate) => rate switch
     _    => "rate-" + rate.Value.ToString("0.##", CultureInfo.InvariantCulture),
 };
 
-const string BaseSelect = @"
+string BaseSelect = $@"
 SELECT  t.tw_Id, t.tw_Symbol, t.tw_Nazwa, t.tw_Opis, t.tw_PodstKodKresk,
         t.tw_Masa, t.tw_Rodzaj, t.tw_Zablokowany,
         v.vat_Stawka,
-        c.tc_CenaNetto1, c.tc_CenaBrutto1,
+        {PriceLevel.SelectColumns},
         ISNULL(s.stan, 0)  AS stan,
         ISNULL(s.rez, 0)   AS rez,
         md.mdt_Id          AS modelId,
@@ -260,7 +260,7 @@ object Variation(Row t, Dictionary<int, List<string>> cechy)
                      .Concat((cechy.TryGetValue(t.Id, out var cs) ? cs : new List<string>())
                               .Select((cecha, i) => (object)new { id = 100 + i, name = cecha, option = "tak" }))
                      .ToArray(),
-        image = t.HasImage ? new { id = t.Id, src = $"{PublicBase}/gt-image/{t.Id}" } : null,
+        image = t.HasImage ? new { id = t.Id, src = $"{PublicBase}/gt-image/{t.Id}{ImageUrlSignature.QuerySuffix(t.Id)}" } : null,
         stock_quantity = (int)Math.Floor(available),
         manage_stock = true,
         stock_status = available > 0 ? "instock" : "outofstock",
@@ -302,7 +302,7 @@ object ProductOf(List<Row> g, Dictionary<int, List<string>> cechy)
             ? new object[] { new { id = gid, name = head.GroupName ?? "", slug = "grupa-" + gid } }
             : Array.Empty<object>(),
         images = g.Where(x => x.HasImage)
-                  .Select(x => new { id = x.Id, src = $"{PublicBase}/gt-image/{x.Id}", alt = x.Name })
+                  .Select(x => new { id = x.Id, src = $"{PublicBase}/gt-image/{x.Id}{ImageUrlSignature.QuerySuffix(x.Id)}", alt = x.Name })
                   .ToArray(),
         attributes = new object[] { new { id = 0, name = "Wariant", position = 0, variation = true, visible = true,
                                          options = g.Select(x => x.Name).ToArray() } }
@@ -614,8 +614,17 @@ app.MapGet("/wp-json/wc/v3/taxes", async (HttpRequest req) =>
 });
 
 // Zdjecie towaru prosto z tw_ZdjecieTw (blob w bazie GT).
-app.MapGet("/gt-image/{towarId:int}", async (int towarId) =>
+app.MapGet("/gt-image/{towarId:int}", async (int towarId, HttpRequest imgReq) =>
 {
+    // #3365 - the only gate this route has. It is excluded from basic auth by
+    // an explicit carve-out and from the bearer gate because its path is not
+    // under /api, and it takes a SEQUENTIAL integer - so without this, anyone
+    // reaching port 5056 could count 1..N and take the whole image library.
+    // A header cannot be the answer: a browser and a marketplace fetch these
+    // URLs and neither attaches one. See ImageUrlSignature for what this does
+    // and, just as importantly, what it does not claim to do.
+    if (!ImageUrlSignature.IsValid(towarId, imgReq.Query[ImageUrlSignature.ParameterName]))
+        return Results.NotFound();
     await using var c = new SqlConnection(BridgeConfig.ConnectionString);
     await c.OpenAsync();
     await using var cmd = new SqlCommand(

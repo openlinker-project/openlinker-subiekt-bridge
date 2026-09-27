@@ -1,4 +1,4 @@
-// ProductsEndpoints - ProductMaster capability.
+﻿// ProductsEndpoints - ProductMaster capability.
 //
 // Speaks the contract in libs/integrations/subiekt/src/bridge/subiekt-bridge-products.types.ts
 // (English /api/products* routes, {success,data,error} envelope, Polish field
@@ -209,10 +209,10 @@ public static class ProductsEndpoints
         await using var c = new SqlConnection(ConnStr);
         await c.OpenAsync();
         await using var cmd = new SqlCommand(
-            @"SELECT t.tw_Symbol, t.tw_Nazwa, t.tw_Opis, t.tw_JednMiary, t.tw_Masa,
-                     c.tc_CenaNetto1, c.tc_CenaBrutto1, v.vat_Stawka, t.tw_Id,
+            $@"SELECT t.tw_Symbol, t.tw_Nazwa, t.tw_Opis, t.tw_JednMiary, t.tw_Masa,
+                     {PriceLevel.SelectColumns}, v.vat_Stawka, t.tw_Id,
                      g.grt_Id, g.grt_Nazwa, md.mdt_Id, md.mdt_Nazwa,
-                     c.tc_IdWaluta1
+                     {PriceLevel.CurrencyColumn}
               FROM sl_ModelTw md
               JOIN sl_ModelTowar mt ON mt.mtw_IdModel = md.mdt_Id
               JOIN tw__Towar t ON t.tw_Id = mt.mtw_IdTowar AND t.tw_Usuniety = 0
@@ -267,10 +267,10 @@ public static class ProductsEndpoints
         await using var c = new SqlConnection(ConnStr);
         await c.OpenAsync();
         await using var cmd = new SqlCommand(
-            @"SELECT TOP (@lim) t.tw_Symbol, t.tw_Nazwa, t.tw_Opis, t.tw_JednMiary, t.tw_Masa,
-                     c.tc_CenaNetto1, c.tc_CenaBrutto1, v.vat_Stawka, t.tw_Id,
+            $@"SELECT TOP (@lim) t.tw_Symbol, t.tw_Nazwa, t.tw_Opis, t.tw_JednMiary, t.tw_Masa,
+                     {PriceLevel.SelectColumns}, v.vat_Stawka, t.tw_Id,
                      g.grt_Id, g.grt_Nazwa, md.mdt_Id, md.mdt_Nazwa,
-                     c.tc_IdWaluta1
+                     {PriceLevel.CurrencyColumn}
               FROM tw__Towar t
               LEFT JOIN tw_Cena c ON c.tc_IdTowar = t.tw_Id
               LEFT JOIN sl_StawkaVAT v ON v.vat_Id = t.tw_IdVatSp
@@ -321,10 +321,10 @@ public static class ProductsEndpoints
         await using var c = new SqlConnection(ConnStr);
         await c.OpenAsync();
         await using var cmd = new SqlCommand(
-            @"SELECT TOP 1 t.tw_Symbol, t.tw_Nazwa, t.tw_Opis, t.tw_JednMiary, t.tw_Masa,
-                     c.tc_CenaNetto1, c.tc_CenaBrutto1, v.vat_Stawka, t.tw_Id,
+            $@"SELECT TOP 1 t.tw_Symbol, t.tw_Nazwa, t.tw_Opis, t.tw_JednMiary, t.tw_Masa,
+                     {PriceLevel.SelectColumns}, v.vat_Stawka, t.tw_Id,
                      g.grt_Id, g.grt_Nazwa, md.mdt_Id, md.mdt_Nazwa,
-                     c.tc_IdWaluta1
+                     {PriceLevel.CurrencyColumn}
               FROM tw__Towar t
               LEFT JOIN tw_Cena c ON c.tc_IdTowar = t.tw_Id
               LEFT JOIN sl_StawkaVAT v ON v.vat_Id = t.tw_IdVatSp
@@ -378,7 +378,7 @@ public static class ProductsEndpoints
                 // /gt-image/{towarId} serves the MAIN image only, so only the
                 // first one has a route today; the rest are skipped rather than
                 // pointed at a URL that would return the wrong bytes.
-                if (idx == 0) urls.Add($"{imageBase}/gt-image/{towarId}");
+                if (idx == 0) urls.Add($"{imageBase}/gt-image/{towarId}{ImageUrlSignature.QuerySuffix(towarId)}");
                 idx++;
             }
         }
@@ -494,10 +494,25 @@ public static class ProductsEndpoints
     {
         dynamic ceny = tw.Ceny;
         int count = ceny.Liczba;
+        // #3365 - the OPERATOR's level, not a hardcoded first one. Sfera ids
+        // count from 0 where the operator and SQL count from 1, so the target
+        // is Configured - 1; PriceLevel.cs states that correspondence once so
+        // it cannot be re-derived differently here and in the read columns.
+        var wanted = PriceLevel.SferaLevelId;
         for (int i = 1; i <= count; i++)
         {
             dynamic poziom = ceny.Element(i);
-            if ((int)poziom.Id == 0) return poziom;
+            if ((int)poziom.Id == wanted) return poziom;
+        }
+        // The towar carries no such level. Falling back to the first one would
+        // write the configured price onto a DIFFERENT level than the one being
+        // read, which is the silent mismatch this whole change removes - so a
+        // non-default configuration refuses instead.
+        if (wanted != 0)
+        {
+            throw new InvalidOperationException(
+                $"Towar has no price level {PriceLevel.Configured} (config PriceLevel). " +
+                "Writing another level would publish a price OpenLinker does not read back.");
         }
         return count > 0 ? ceny.Element(1) : null;
     }
