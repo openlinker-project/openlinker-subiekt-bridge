@@ -294,10 +294,33 @@ public static class Sfera
                 // own default, so a EUR order became a PLN order of the same
                 // numeric value. Best-effort: an unknown symbol must not fail
                 // an order that is already paid.
+                // REFUSED, not swallowed (#3365 audit). The catch here preserved
+                // exactly the failure the comment above describes: a EUR order
+                // became a PLN order of the same numeric value, with the only
+                // trace on the bridge process's stderr on the operator's Windows
+                // box. Nothing reached OpenLinker, the job, or any log an
+                // operator reads.
+                //
+                // "Best-effort: an unknown symbol must not fail an order that is
+                // already paid" had the trade backwards. A refused order is
+                // visible and fixable - the operator adds the currency to
+                // Subiekt and retries. A silently redenominated one is a wrong
+                // number in the ERP that nobody can see, and every document
+                // drawn from that ZK inherits it.
+                //
+                // A domestic order is unaffected: OpenLinker sends the ISO code
+                // and an install whose default is PLN accepts "PLN".
                 if (req.Waluta != "")
                 {
                     try { d.WalutaSymbol = req.Waluta; }
-                    catch (Exception e) { Console.Error.WriteLine($"Sfera.CreateZk: could not set WalutaSymbol='{req.Waluta}' - {e.Message}"); }
+                    catch (Exception e)
+                    {
+                        throw new InvalidOperationException(
+                            $"Subiekt would not accept currency '{req.Waluta}' on this order. " +
+                            "Add it to Subiekt's currency table (Słowniki > Waluty) and retry - " +
+                            "writing the document without it would record the amounts in the " +
+                            $"install's default currency instead. ({e.Message})", e);
+                    }
                 }
                 // Answer the stock-reservation question up front. Left unset,
                 // Subiekt raises a modal Tak/Nie dialog and the COM call blocks
