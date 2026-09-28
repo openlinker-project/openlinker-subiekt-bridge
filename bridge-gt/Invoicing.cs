@@ -930,12 +930,19 @@ public static class Invoicing
         });
     }
 
-    private static string MakeSymbol(string name)
-    {
-        var baseSym = name.ToUpperInvariant();
-        var sym = new string(baseSym.Where(ch => char.IsLetterOrDigit(ch) || ch == '-' || ch == '_').Take(16).ToArray());
-        return sym == "" ? "INV" + DateTime.Now.ToString("HHmmssfff") : sym;
-    }
+    /// <summary>
+    /// The FOURTH copy of this rule, now deleted (PR #7 review).
+    ///
+    /// `Kontrahent.cs`'s header exists to record that the symbol derivation
+    /// lived in three places and was unified; this private twin made it four,
+    /// differing only in the fallback prefix. It also carried the
+    /// non-deterministic `DateTime.Now` fallback that minted a fresh
+    /// kontrahent per order for an unnamed buyer.
+    ///
+    /// The prefix is preserved as an argument, so a NIP-less buyer on the
+    /// invoicing path still cannot collide with one on the order path.
+    /// </summary>
+    private static string MakeSymbol(string name) => Kontrahent.MakeSymbol(name, "INV");
 }
 
 public sealed class InvoiceValidationException : Exception

@@ -43,13 +43,35 @@ public static class Kontrahent
     ///
     /// `fallbackPrefix` names the caller when the name yields nothing usable,
     /// so an unnamed buyer does not collide across paths.
+    ///
+    /// The unnamed fallback is DETERMINISTIC (PR #7 review). It used to append
+    /// `DateTime.Now.ToString("HHmmssfff")`, so every order from an unnamed
+    /// buyer minted a fresh symbol and therefore a fresh kontrahent - an
+    /// unbounded set of one-order contractors, which is the `NORBERTKULUS(5)`,
+    /// `(6)`, `(7)` defect this file exists to prevent, arrived at by another
+    /// route. One well-known symbol that every such order attaches to is more
+    /// honest than a new contractor per sale: a buyer OpenLinker cannot name is
+    /// genuinely one unidentified party, and an operator can find and split
+    /// them afterwards.
     /// </summary>
     public static string MakeSymbol(string name, string fallbackPrefix = "ZAM")
     {
         var baseSym = (name ?? "").ToUpperInvariant();
         var sym = new string(baseSym.Where(ch => char.IsLetterOrDigit(ch) || ch == '-' || ch == '_').Take(16).ToArray());
-        return sym == "" ? fallbackPrefix + DateTime.Now.ToString("HHmmssfff") : sym;
+        return sym == "" ? fallbackPrefix + "-ANON" : sym;
     }
+
+    /// <summary>
+    /// A tax id reduced to its digits, for comparison only (PR #7 review).
+    ///
+    /// `FindByNip` matched on `nip.Trim()` alone, so `123-456-78-90` and
+    /// `1234567890` were two different buyers and each minted its own
+    /// kontrahent. Polish NIPs are written both ways routinely, and the stored
+    /// side is whatever an operator typed years ago, so BOTH sides are reduced
+    /// rather than assuming either is clean.
+    /// </summary>
+    public static string DigitsOnly(string? value) =>
+        new string((value ?? "").Where(char.IsDigit).ToArray());
 
     /// <summary>
     /// kh__Kontrahent carries no NIP column of its own - it lives on the
@@ -60,11 +82,18 @@ public static class Kontrahent
         if (string.IsNullOrWhiteSpace(nip)) return null;
         await using var c = new SqlConnection(BridgeConfig.ConnectionString);
         await c.OpenAsync();
+        // Both sides reduced to digits (PR #7 review): the stored value is
+        // whatever an operator typed, and the incoming one is whatever the
+        // marketplace sent. Matching on the raw strings made `123-456-78-90`
+        // and `1234567890` two buyers.
+        var wanted = DigitsOnly(nip);
+        if (wanted == "") return null;
         await using var cmd = new SqlCommand(
             @"SELECT TOP 1 k.kh_Id FROM kh__Kontrahent k
               JOIN adr__Ewid a ON a.adr_IdObiektu = k.kh_Id AND a.adr_TypAdresu = 1
-              WHERE a.adr_NIP = @nip ORDER BY k.kh_Id", c);
-        cmd.Parameters.AddWithValue("@nip", nip.Trim());
+              WHERE REPLACE(REPLACE(REPLACE(REPLACE(ISNULL(a.adr_NIP,''),'-',''),' ',''),'.',''),'/','') = @nip
+              ORDER BY k.kh_Id", c);
+        cmd.Parameters.AddWithValue("@nip", wanted);
         var r = await cmd.ExecuteScalarAsync();
         return r is null || r is DBNull ? null : Convert.ToInt32(r);
     }
@@ -115,16 +144,36 @@ public static class Kontrahent
     /// bills one person's document to another's name and address, which the
     /// operator cannot see from Subiekt - so the rule is now: a match needs
     /// at least one field CONFIRMED equal on both sides, and no field
-    /// CONTRADICTED. Nothing confirmable on either side is treated as
-    /// insufficient evidence (no match), not as a pass.
+    /// CONTRADICTED.
+    ///
+    /// With ONE stated exception, which the body carries and which this
+    /// docblock used to contradict (PR #7 review): a buyer who supplies NO
+    /// address at all is accepted on the symbol alone. The reasoning is at the
+    /// carve-out itself. A candidate with a blank STORED address against a
+    /// buyer who supplied one is still no match - that half is closed, and it
+    /// is the half the original finding named.
     /// </summary>
     public static async Task<bool> MatchesAddress(int kontrahentId, string? kod, string? miasto)
     {
         var wantKod = (kod ?? "").Trim();
         var wantMiasto = (miasto ?? "").Trim();
-        // The buyer supplied no address at all - there is nothing to verify
-        // against, so this is the one case with no evidence in EITHER
-        // direction and the caller's symbol match stands on its own.
+        // THE ONE CARVE-OUT, stated here because the docblock above states the
+        // opposite rule without it (PR #7 review).
+        //
+        // A buyer who supplied no postcode and no city is accepted on the
+        // SYMBOL alone. That is a real risk and it is chosen deliberately: two
+        // different people whose names both reduce to the same 16-character
+        // `MakeSymbol` output, on a payload carrying no address, resolve to one
+        // kontrahent - and the second one's document then carries the first
+        // one's address and NIP.
+        //
+        // It is the lesser risk because the alternative refuses EVERY
+        // address-less buyer a match and mints a fresh kontrahent per order,
+        // which is the unbounded-duplicates defect this file exists to prevent
+        // and which an operator meets on every marketplace order that carries
+        // no invoice address - the common case, not the exceptional one. A NIP,
+        // when the buyer supplies one, is matched first and is not affected by
+        // this at all.
         if (wantKod == "" && wantMiasto == "") return true;
 
         try

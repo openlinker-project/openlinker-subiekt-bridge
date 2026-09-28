@@ -34,7 +34,7 @@ public static class InventoryEndpoints
     // as-is once fixed) apart from "in-doubt" (a Sfera.Run COM timeout, whose
     // write may still commit later - see Sfera.Run's own docblock).
     private static IResult Fail(string code, string reason, int status = 422, string failureMode = "rejected") =>
-        Results.Json(new { success = false, data = (object?)null, error = new { code, reason, correlationId = (string?)null, failureMode } }, statusCode: status);
+        BridgeEnvelope.Fail(code, reason, status, failureMode);
 
     private static string Trim30(string s) => s.Length <= 30 ? s : s.Substring(0, 30);
 

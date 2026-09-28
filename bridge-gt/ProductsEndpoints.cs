@@ -41,7 +41,7 @@ public static class ProductsEndpoints
     // Program.cs) sends {code,reason,correlationId,failureMode} and
     // SubiektBridgeHttpClient (TS) reads `error.reason`.
     private static IResult Fail(string code, string reason, int status = 422, string failureMode = "rejected") =>
-        Results.Json(new { success = false, data = (object?)null, error = new { code, reason, correlationId = (string?)null, failureMode } }, statusCode: status);
+        BridgeEnvelope.Fail(code, reason, status, failureMode);
 
     public static void MapProductsEndpoints(this WebApplication app)
     {

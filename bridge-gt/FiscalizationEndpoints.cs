@@ -68,7 +68,7 @@ public static class FiscalizationEndpoints
     // `error.reason`, so every rejected fiscalize call reported a generic
     // HTTP status with no real reason string on the caller side.
     private static IResult Fail(string code, string reason, int status = 422, string failureMode = "rejected") =>
-        Results.Json(new { success = false, data = (object?)null, error = new { code, reason, correlationId = (string?)null, failureMode } }, statusCode: status);
+        BridgeEnvelope.Fail(code, reason, status, failureMode);
 
     public static void MapFiscalizationEndpoints(this WebApplication app)
     {

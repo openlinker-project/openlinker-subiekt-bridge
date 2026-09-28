@@ -61,7 +61,7 @@ public static class OrdersEndpoints
     // failure looked identical and a caller had no way to tell "safe to
     // retry" from "must verify before retrying".
     private static IResult Fail(string code, string reason, int status = 422, string failureMode = "rejected") =>
-        Results.Json(new { success = false, data = (object?)null, error = new { code, reason, correlationId = (string?)null, failureMode } }, statusCode: status);
+        BridgeEnvelope.Fail(code, reason, status, failureMode);
 
     public static void MapOrdersEndpoints(this WebApplication app)
     {
