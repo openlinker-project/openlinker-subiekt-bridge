@@ -148,10 +148,11 @@ public static class Kontrahent
     ///
     /// With ONE stated exception, which the body carries and which this
     /// docblock used to contradict (PR #7 review): a buyer who supplies NO
-    /// address at all is accepted on the symbol alone. The reasoning is at the
-    /// carve-out itself. A candidate with a blank STORED address against a
-    /// buyer who supplied one is still no match - that half is closed, and it
-    /// is the half the original finding named.
+    /// address at all is accepted on the symbol alone. The reasoning, and an
+    /// honest measure of what it costs, is at the carve-out itself. A candidate
+    /// with a blank STORED address against a buyer who supplied one is still no
+    /// match - that half is closed, and it is the half the original finding
+    /// named.
     /// </summary>
     public static async Task<bool> MatchesAddress(int kontrahentId, string? kod, string? miasto)
     {
@@ -161,11 +162,26 @@ public static class Kontrahent
         // opposite rule without it (PR #7 review).
         //
         // A buyer who supplied no postcode and no city is accepted on the
-        // SYMBOL alone. That is a real risk and it is chosen deliberately: two
-        // different people whose names both reduce to the same 16-character
-        // `MakeSymbol` output, on a payload carrying no address, resolve to one
-        // kontrahent - and the second one's document then carries the first
-        // one's address and NIP.
+        // SYMBOL alone. That is a real risk and it is chosen deliberately.
+        //
+        // #3365 review - the risk is LARGER than this comment used to claim.
+        // It said "two different people whose names both reduce to the same
+        // 16-character `MakeSymbol` output", which reads like a hash collision.
+        // `MakeSymbol` is not a hash: it uppercases the name and keeps the first
+        // 16 alphanumeric characters, so the colliding case is simply TWO
+        // CUSTOMERS WITH THE SAME NAME - common rather than exotic for Polish
+        // surnames. Two address-less orders from two different Jan Kowalskis
+        // resolve to one kontrahent, and the second sale is booked against the
+        // first one's record.
+        //
+        // It is still the lesser risk, for the reason below, and the bridge
+        // cannot do better with what it is given: OL sends `{name, nip,
+        // isCompany, address}` and nothing that identifies the buyer, so with no
+        // NIP and no address there is genuinely nothing left to tell them apart.
+        // The REAL fix is a discriminating identifier in the payload (an OL buyer
+        // id or the buyer e-mail) folded into the symbol - a contract change
+        // across core, this bridge and every existing kontrahent's symbol, so it
+        // is named here rather than improvised.
         //
         // It is the lesser risk because the alternative refuses EVERY
         // address-less buyer a match and mints a fresh kontrahent per order,

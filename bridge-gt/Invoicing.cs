@@ -66,13 +66,11 @@ public static class Invoicing
     /// semantically-structured idempotency key - NOT to FindZkIdByOrderRef's
     /// plain order-id lookup, which is short enough on its own and was confirmed
     /// unaffected (#3440 investigation).</summary>
-    private static string ReduceIdempotencyKey(string key)
-    {
-        if (key.Length <= 30) return key;
-        using var sha = System.Security.Cryptography.SHA256.Create();
-        var hash = sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(key));
-        return Convert.ToHexString(hash).Substring(0, 30);
-    }
+    /// Delegates so there is exactly ONE reduction in the bridge. Three copies of a
+    /// hash that must agree byte for byte is how two paths quietly stop finding each
+    /// other's keys - a divergence that produces duplicate documents rather than an
+    /// error. The full rationale lives on Sfera.ReduceIdempotencyKey.
+    private static string ReduceIdempotencyKey(string key) => Sfera.ReduceIdempotencyKey(key);
 
     /// <summary>sl_StawkaVAT.vat_Id for a percent-as-string rate code (e.g. "23"). Sfera's
     /// SuPozycja.VatId (writable) is the only way to set a line's VAT rate -

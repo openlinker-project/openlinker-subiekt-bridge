@@ -367,6 +367,41 @@ public static class Sfera
     /// <summary>dok_NrPelnyOryg is varchar(30) — a longer value is refused outright.</summary>
     public static string Trim30(string s) => s.Length <= 30 ? s : s.Substring(0, 30);
 
+    /// <summary>#3440: reduce a long, semantically-structured OL idempotency key to
+    /// something dok_NrPelnyOryg (varchar(30)) can hold, WITHOUT discarding the part
+    /// that varies.
+    ///
+    /// Truncating is not a size fix, it is a silent collision: every OL key of this
+    /// shape leads with a fixed prefix and a long id, so `Trim30` keeps the part that
+    /// is the same for many operations and throws away the part that tells them apart.
+    /// `invoice:{connectionId}:{orderId}` (~90 chars) collapsed every document for a
+    /// connection onto the first one ever issued; `return:{returnId}:{lineId}:{seq}`
+    /// (~88 chars) collapses every LINE of one return onto its first line AND discards
+    /// the `seq` that exists precisely to tell a retry from a fresh disposition, so the
+    /// second line's restock comes back "deduplicated" and no stock moves for it.
+    ///
+    /// Hash rather than truncate: SHA-256 hex, first 30 chars. Deterministic, so a
+    /// genuine retry of the same key still resolves to the same document and the
+    /// fiscal-safety idempotency guarantee is preserved; 30 hex chars is 120 bits, so
+    /// a collision across any realistic volume is not a practical concern.
+    ///
+    /// Applied ONLY where the key really is one of these long structured keys - NOT to
+    /// a plain order-id lookup, which is short enough on its own and is left alone
+    /// (`FindZkIdByOrderRef`, confirmed unaffected by the #3440 investigation).
+    ///
+    /// UPGRADE NOTE: a key stored under the old truncation is not found under the new
+    /// reduction. The only affected operations are ones already in flight across the
+    /// upgrade; a retry of one of those can create a second document. That window is
+    /// the price of no longer collapsing unrelated operations onto each other, which
+    /// is a permanent, silent loss rather than a one-off one.</summary>
+    public static string ReduceIdempotencyKey(string key)
+    {
+        if (key.Length <= 30) return key;
+        using var sha = System.Security.Cryptography.SHA256.Create();
+        var hash = sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(key));
+        return Convert.ToHexString(hash).Substring(0, 30);
+    }
+
     /// <summary>kh_Nazwa (short name) is nvarchar(50).</summary>
     public static string Trim50(string s) => s.Length <= 50 ? s : s.Substring(0, 50);
 

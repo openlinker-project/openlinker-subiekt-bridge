@@ -7,7 +7,8 @@
 // mirroring Sfera.CreateZk's Pozycje.Dodaj/Zapisz pattern in Sfera.cs.
 //
 // Idempotency (#2368): mirrors Invoicing.cs's FindByIdempotencyKey exactly -
-// the caller's idempotencyKey is stamped onto dok_NrPelnyOryg (Trim30) and
+// the caller's idempotencyKey is stamped onto dok_NrPelnyOryg (reduced by
+// Sfera.ReduceIdempotencyKey, #3440) and
 // checked BEFORE writing. dok_Typ for PW/RW is not established from a prior
 // session, so the idempotency lookup matches on dok_NrPelnyOryg alone (no
 // dok_Typ filter) - acceptable because idempotencyKey is caller-chosen and
@@ -36,7 +37,14 @@ public static class InventoryEndpoints
     private static IResult Fail(string code, string reason, int status = 422, string failureMode = "rejected") =>
         BridgeEnvelope.Fail(code, reason, status, failureMode);
 
-    private static string Trim30(string s) => s.Length <= 30 ? s : s.Substring(0, 30);
+    // #3440: the restock key core sends is `return:{returnId}:{lineId}:{seq}`,
+    // about 88 characters. Truncating it to 30 kept `return:ol_return_` plus the
+    // first 13 characters of the return id and threw away BOTH the line id and
+    // the `seq` - so every line of one return shared one key, the second line's
+    // restock came back "deduplicated", and no stock moved for it. The `seq`
+    // that exists to tell a retry from a fresh disposition was discarded with
+    // it. Reduce by hash instead; one definition, in Sfera.cs, so the three
+    // paths that need it cannot drift into three different answers.
 
     public static void MapInventoryEndpoints(this WebApplication app)
     {
@@ -176,7 +184,7 @@ public static class InventoryEndpoints
         await c.OpenAsync();
         await using var cmd = new SqlCommand(
             "SELECT TOP 1 dok_Id, dok_NrPelny FROM dok__Dokument WHERE dok_NrPelnyOryg = @k", c);
-        cmd.Parameters.AddWithValue("@k", Trim30(key));
+        cmd.Parameters.AddWithValue("@k", Sfera.ReduceIdempotencyKey(key));
         await using var r = await cmd.ExecuteReaderAsync();
         if (!await r.ReadAsync()) return null;
         return (r.GetInt32(0), r.GetString(1).Trim());
@@ -211,7 +219,7 @@ public static class InventoryEndpoints
         // write a PW/RW, double-moving stock. Serialized per reduced key via
         // IdempotencyLock; a blank key (opt-in dedup, caller supplied none)
         // runs unlocked exactly as before.
-        var lockKey = req.IdempotencyKey is { Length: > 0 } lk ? Trim30(lk) : "";
+        var lockKey = req.IdempotencyKey is { Length: > 0 } lk ? Sfera.ReduceIdempotencyKey(lk) : "";
         return await IdempotencyLock.RunExclusive(lockKey, async () =>
         {
             if (req.IdempotencyKey is { Length: > 0 } key)
@@ -246,7 +254,7 @@ public static class InventoryEndpoints
                     poz.IloscJm = Math.Abs(req.Delta);
 
                     if (!string.IsNullOrEmpty(req.Uwagi)) d.Uwagi = req.Uwagi;
-                    if (req.IdempotencyKey is { Length: > 0 } k2) d.NumerOryginalny = Trim30(k2);
+                    if (req.IdempotencyKey is { Length: > 0 } k2) d.NumerOryginalny = Sfera.ReduceIdempotencyKey(k2);
 
                     d.Zapisz();
                     docId = (int)d.Identyfikator;

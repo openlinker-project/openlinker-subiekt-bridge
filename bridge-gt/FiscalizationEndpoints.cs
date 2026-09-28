@@ -111,7 +111,7 @@ public static class FiscalizationEndpoints
             // calls under the same idempotencyKey could both read "not
             // found" and both fiscalize, double-registering a real sale on
             // the physical device. Serialized per reduced key.
-            return await IdempotencyLock.RunExclusive(Trim30(body.IdempotencyKey), async () =>
+            return await IdempotencyLock.RunExclusive(Sfera.ReduceIdempotencyKey(body.IdempotencyKey), async () =>
             {
                 // --- idempotency pre-check (mirrors Invoicing.cs's FindByIdempotencyKey,
                 //     PA doctype = dok_Typ 21) ------------------------------------
@@ -177,7 +177,7 @@ public static class FiscalizationEndpoints
                                 try { d.KasaId = ksaId; } catch { /* best-effort, mirrors Invoicing.cs */ }
                             }
 
-                            d.NumerOryginalny = Trim30(body.IdempotencyKey);
+                            d.NumerOryginalny = Sfera.ReduceIdempotencyKey(body.IdempotencyKey);
 
                             // --- the fiscalization act itself ---------------------
                             d.RejestrujNaUF = true;                       // SuDokument_RejestrujNaUF.htm
@@ -274,7 +274,7 @@ public static class FiscalizationEndpoints
         // distinct dok_Typ before relying on this).
         await using var cmd = new SqlCommand(
             "SELECT TOP 1 dok_Id, dok_NrPelny, dok_StatusFiskal FROM dok__Dokument WHERE dok_NrPelnyOryg = @k AND dok_Typ = 21", c);
-        cmd.Parameters.AddWithValue("@k", Trim30(key));
+        cmd.Parameters.AddWithValue("@k", Sfera.ReduceIdempotencyKey(key));
         await using var r = await cmd.ExecuteReaderAsync();
         if (!await r.ReadAsync()) return null;
         var (status, _) = MapFiscalStatus(r.IsDBNull(2) ? (int?)null : r.GetInt32(2));
@@ -291,7 +291,12 @@ public static class FiscalizationEndpoints
         return r is null || r is DBNull ? null : Convert.ToInt32(r);
     }
 
-    private static string Trim30(string s) => s.Length <= 30 ? s : s.Substring(0, 30);
+    // #3440: the fiscal key core sends is `fiscal:{connectionId}:{orderId}`, about
+    // 85 characters. Truncating it to 30 kept `fiscal:` plus most of the connection
+    // id and threw the ORDER id away - so every registration on one connection
+    // shared one key, and the second sale of the day was reported as already
+    // registered and never reached the device. Reduce by hash instead; one
+    // definition, in Sfera.cs, so the three paths that need it cannot drift.
 }
 
 public sealed class FiscalizeLine

@@ -42,7 +42,12 @@ using Microsoft.Data.SqlClient;
 
 public static class OrdersEndpoints
 {
-    // UNCONFIRMED - see file header note 1.
+    // CONFIRMED (#3365) - see file header note 1, which this used to contradict
+    // by still saying UNCONFIRMED after the header was updated.
+    //
+    // It is a DATE OF ISSUE, not an event timestamp, so many ZK rows share one
+    // value - which is why the feed below pages on (date, id) rather than on the
+    // date alone. See ListOrderFeed.
     private const string DokDataKolumna = "dok_DataWyst";
 
     // One source of configuration for every file that talks to SQL - see
@@ -101,8 +106,8 @@ public static class OrdersEndpoints
             // 500 sfera_error - misleading retry logic on the caller side
             // into treating a caller-supplied bad value as a transient
             // server failure.
-            if (since is { Length: > 0 } && !DateTime.TryParse(since, CultureInfo.InvariantCulture, DateTimeStyles.None, out _))
-                return Fail("bad_request", $"'since' is not a parseable timestamp: '{since}'.", 400);
+            if (since is { Length: > 0 } && !TryParseCursor(since, out _, out _))
+                return Fail("bad_request", $"'since' is not a parseable cursor: '{since}'.", 400);
 
             try
             {
@@ -334,38 +339,91 @@ public static class OrdersEndpoints
     /// <summary>dok_NrPelnyOryg is varchar(30) - refused outright past that length.</summary>
     private static string Trim30(string s) => s.Length <= 30 ? s : s.Substring(0, 30);
 
+    /// <summary>#3365 review: parse a feed cursor in EITHER form.
+    ///
+    /// The current form is composite - `{iso}|{dok_Id}` - because the watermark
+    /// column is a date of issue rather than an event timestamp, so many ZK rows
+    /// legitimately share one value and a date alone cannot say where a page
+    /// stopped inside that value.
+    ///
+    /// A bare timestamp is still accepted, because that is what every cursor
+    /// persisted before this change looks like. It resolves to id 0, which
+    /// deliberately RE-READS every row carrying that timestamp: under the old
+    /// strict `>` those rows were skipped, so re-reading them is the repair, not a
+    /// cost. Re-delivery is free - OL's `syncOrderFromSource` is an idempotent
+    /// update-or-create under a per-order lock.</summary>
+    private static bool TryParseCursor(string cursor, out DateTime watermark, out int lastId)
+    {
+        watermark = default;
+        lastId = 0;
+        var bar = cursor.LastIndexOf('|');
+        if (bar < 0)
+            return DateTime.TryParse(cursor, CultureInfo.InvariantCulture, DateTimeStyles.None, out watermark);
+
+        return DateTime.TryParse(cursor[..bar], CultureInfo.InvariantCulture, DateTimeStyles.None, out watermark)
+            && int.TryParse(cursor[(bar + 1)..], NumberStyles.Integer, CultureInfo.InvariantCulture, out lastId);
+    }
+
+    private static string FormatCursor(DateTime watermark, int lastId) =>
+        watermark.ToString("o", CultureInfo.InvariantCulture) + "|" + lastId.ToString(CultureInfo.InvariantCulture);
+
     /// <summary>
-    /// Watermark-cursor page over ZK documents. 'since' is an ISO timestamp
-    /// (null = beginning); nextCursor is the max watermark seen in this page,
+    /// Keyset page over ZK documents, ordered by (issue date, document id).
+    ///
+    /// The id is not decoration. `dok_DataWyst` is the DATE a document was
+    /// issued, and in this database that is a day rather than an instant - so a
+    /// shop issuing more than `limit` orders in one day has more than `limit`
+    /// rows carrying the identical value. Paging on the date alone with a strict
+    /// `>` then walked the cursor past the whole of that day after the first
+    /// page, and every remaining order from it was never read again: not delayed,
+    /// LOST, with nothing anywhere to say so. Ordering by (date, id) and
+    /// comparing the pair is what makes the page boundary land between two rows
+    /// instead of in the middle of a group of equals.
+    ///
+    /// 'since' is null for the beginning; nextCursor is the last row of the page,
     /// or null when the page was empty.
     /// </summary>
     private static async Task<OrderFeedResponse> ListOrderFeed(string? since, int limit)
     {
+        DateTime watermark = default;
+        var lastId = 0;
+        var hasCursor = since is { Length: > 0 } && TryParseCursor(since, out watermark, out lastId);
+
         await using var c = new SqlConnection(ConnStr);
         await c.OpenAsync();
         var sql = $@"SELECT TOP (@limit) dok_Id, dok_NrPelny, {DokDataKolumna}
                      FROM dok__Dokument
                      WHERE dok_Typ = {DocumentTypes.Zk}
-                       AND (@since IS NULL OR {DokDataKolumna} > @since)
-                     ORDER BY {DokDataKolumna} ASC";
+                       AND (@since IS NULL
+                            OR {DokDataKolumna} > @since
+                            OR ({DokDataKolumna} = @since AND dok_Id > @sinceId))
+                     ORDER BY {DokDataKolumna} ASC, dok_Id ASC";
         await using var cmd = new SqlCommand(sql, c);
         cmd.Parameters.AddWithValue("@limit", limit);
-        cmd.Parameters.AddWithValue("@since", (object?)(since is null ? null : DateTime.Parse(since, CultureInfo.InvariantCulture)) ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@since", hasCursor ? watermark : (object)DBNull.Value);
+        cmd.Parameters.AddWithValue("@sinceId", lastId);
 
         var items = new List<OrderFeedItem>();
+        DateTime lastWatermark = default;
+        var lastRowId = 0;
         await using (var r = await cmd.ExecuteReaderAsync())
         {
             while (await r.ReadAsync())
             {
                 var data = r.GetDateTime(2);
+                lastWatermark = data;
+                lastRowId = r.GetInt32(0);
                 items.Add(new OrderFeedItem(
-                    r.GetInt32(0),
+                    lastRowId,
                     r.GetString(1).Trim(),
                     data.ToString("o", CultureInfo.InvariantCulture)));
             }
         }
 
-        var nextCursor = items.Count > 0 ? items[^1].DataWystawienia : null;
+        // The cursor names the LAST ROW READ, not the highest date seen. Those are
+        // the same thing only when no two rows share a date, which is exactly the
+        // assumption that made the old cursor lose orders.
+        var nextCursor = items.Count > 0 ? FormatCursor(lastWatermark, lastRowId) : null;
         return new OrderFeedResponse(items, nextCursor);
     }
 
