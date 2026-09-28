@@ -410,8 +410,12 @@ public static class Invoicing
                 // crash may have happened BETWEEN the original invoice commit and
                 // its WZ commit - always re-check/re-attempt, never assume a
                 // found invoice means its stock was already released too.
+                // Same correction as the create branch below (#3365 audit): an
+                // invoice that carries its own movement has ALREADY released
+                // the stock, so report the WZ Subiekt linked rather than a
+                // `null` OpenLinker cannot tell from "no ZK was found".
                 var wzNumerExisting = await DocumentCarriesStockMovement(exId)
-                    ? null
+                    ? (await FindAutoReleasedWzForInvoice(exId))?.Numer
                     : await EnsureWarehouseRelease(req.OrderId, key, exId, req.ZkId, req.Lines, req.MagazynId);
                 await MarkOrderRealizedBestEffort(req.OrderId, req.ZkId);
                 return new IssueResult(exId, exNumer, "issued", regStatus, null, ksefNr, wzNumerExisting);
@@ -531,8 +535,17 @@ public static class Invoicing
             // state and must be reported as issued regardless. An exception here
             // propagates to the caller as a genuine request failure (retryable;
             // EnsureWarehouseRelease's idempotency check makes the retry safe).
+            // #3365 audit: when the invoice itself carries the movement
+            // (`dok_JestRuchMag = 1` - the COMMON configuration, measured live
+            // on FS 38 and FS 39) Subiekt has ALREADY released the stock and
+            // linked its own WZ. Reporting `null` there was indistinguishable
+            // from "no ZK was found", which OpenLinker resolves as
+            // `'not-released'` and error-logs as "the client is billed and the
+            // stock has not moved" - an inverted alarm on every healthy order.
+            // `FindAutoReleasedWzForInvoice` already knows the number; it was
+            // simply never asked on this branch.
             var wzNumer = await DocumentCarriesStockMovement(docId)
-                ? null
+                ? (await FindAutoReleasedWzForInvoice(docId))?.Numer
                 : await EnsureWarehouseRelease(req.OrderId, key, docId, req.ZkId, req.Lines, req.MagazynId);
             await MarkOrderRealizedBestEffort(req.OrderId, req.ZkId);
             return new IssueResult(docId, numer, "issued", finalRegStatus, null, finalKsefNr, wzNumer);
