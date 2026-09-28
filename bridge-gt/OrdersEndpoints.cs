@@ -209,6 +209,41 @@ public static class OrdersEndpoints
                     return new CreateOrderResponse(existingZk.Value.Id, existingZk.Value.Numer);
             }
 
+            // TRANSITIONAL, and deliberately VERIFIED rather than trusted.
+            //
+            // OpenLinker used to send the source's own order number as OrderRef
+            // and now sends its internal order id, because a source order
+            // number is only unique WITHIN one shop: a PrestaShop order 1001
+            // and a WooCommerce order 1001 landing on one Subiekt collided, and
+            // the second sale silently got the first one's ZK back and was
+            // never written. The id is unique by construction.
+            //
+            // But an order whose create was mid-retry across that deploy was
+            // written under the OLD key and is invisible to the new one - which
+            // would mint exactly the duplicate this whole area exists to
+            // prevent. Hence this probe.
+            //
+            // The probe searches on the colliding value, so it CANNOT be
+            // trusted on its own without reopening the bug. It is accepted only
+            // when the document's gross total matches the request's, which two
+            // different shops' order 1001 will not do except by coincidence, and
+            // a coincidence there returns a document for the same money rather
+            // than a different sale's. That is strictly safer than the
+            // unverified match every call used to perform.
+            //
+            // REMOVABLE one release after every deployment has upgraded: drop
+            // this block and LegacyOrderRef together. Nothing else reads it.
+            if (req.LegacyOrderRef is { Length: > 0 } legacy && legacy != req.OrderRef)
+            {
+                var legacyZk = await FindExistingZk(legacy);
+                if (legacyZk is not null)
+                {
+                    var requested = req.Lines.Sum(l => l.WartoscBrutto);
+                    if (Math.Abs(legacyZk.Value.Gross - requested) <= 0.01m)
+                        return new CreateOrderResponse(legacyZk.Value.Id, legacyZk.Value.Numer);
+                }
+            }
+
             // #3369 idempotency fix, part 2: EnsureKontrahent's existingId=0 path
             // ALWAYS creates a fresh kontrahent, so a retry would mint a duplicate.
             // Resolve an existing one first - by NIP when the buyer supplied one,
@@ -284,16 +319,16 @@ public static class OrdersEndpoints
         });
     }
 
-    private static async Task<(int Id, string Numer)?> FindExistingZk(string orderRef)
+    private static async Task<(int Id, string Numer, decimal Gross)?> FindExistingZk(string orderRef)
     {
         await using var c = new SqlConnection(ConnStr);
         await c.OpenAsync();
         await using var cmd = new SqlCommand(
-            $"SELECT TOP 1 dok_Id, dok_NrPelny FROM dok__Dokument WHERE dok_NrPelnyOryg = @k AND dok_Typ = {DocumentTypes.Zk}", c);
+            $"SELECT TOP 1 dok_Id, dok_NrPelny, dok_WartBrutto FROM dok__Dokument WHERE dok_NrPelnyOryg = @k AND dok_Typ = {DocumentTypes.Zk}", c);
         cmd.Parameters.AddWithValue("@k", Trim30(orderRef));
         await using var r = await cmd.ExecuteReaderAsync();
         if (!await r.ReadAsync()) return null;
-        return (r.GetInt32(0), r.GetString(1).Trim());
+        return (r.GetInt32(0), r.GetString(1).Trim(), r.IsDBNull(2) ? 0m : r.GetDecimal(2));
     }
 
     /// <summary>dok_NrPelnyOryg is varchar(30) - refused outright past that length.</summary>
@@ -436,6 +471,12 @@ public sealed class CreateOrderRequest
     public OrderBuyerDto Buyer { get; set; } = new();
     public List<OrderLineDto> Lines { get; set; } = new();
     public string OrderRef { get; set; } = "";
+    /// <summary>The key a PRE-UPGRADE OpenLinker would have sent for this same
+    /// order - its source order number. Probed only when OrderRef finds
+    /// nothing, and only accepted when the gross totals match, because the
+    /// value is the colliding one this change moved away from. See the block
+    /// in CreateOrder for why, and for when it can be deleted.</summary>
+    public string? LegacyOrderRef { get; set; }
     public string? Uwagi { get; set; }
     /// <summary>ISO currency the line amounts are denominated in. Null/empty
     /// leaves the document on Subiekt's own default currency.</summary>
