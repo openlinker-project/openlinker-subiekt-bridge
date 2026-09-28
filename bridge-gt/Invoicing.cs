@@ -639,9 +639,13 @@ public static class Invoicing
                 // ORIGINAL document rather than from the request, because a
                 // return must land where the sale left from. Read before this
                 // lambda, since Sfera.Run is synchronous.
-                DocumentWarehouse.Apply(d, origMagazynId, "KFS");
                 try
                 {
+                    // INSIDE the try, so a refusal still closes the document.
+                    // Outside it, the one path this helper exists to take - the
+                    // throw - leaked an open Sfera document on the single COM
+                    // worker thread, which is the worst place to leak one.
+                    DocumentWarehouse.Apply(d, origMagazynId, "KFS");
                     // THE LINK: NaPodstawie(origId) both stamps DoDokumentuId and
                     // auto-loads d.Pozycje from the original document's own lines.
                     d.NaPodstawie(origId);
@@ -964,8 +968,37 @@ internal static class DocumentWarehouse
         {
             document.MagazynId = id;
         }
+        catch (Microsoft.CSharp.RuntimeBinder.RuntimeBinderException e)
+        {
+            // SFERA DOES NOT EXPOSE THIS PROPERTY, and that is a fact about
+            // Subiekt GT rather than a failure of this call.
+            //
+            // Measured live on 2026-09-28, on ZK and on PW/RW:
+            //   'System.__ComObject' does not contain a definition for 'MagazynId'
+            //
+            // PW/RW is the one site that has carried this assignment since long
+            // before #3365 - behind an empty `catch { }`, which is exactly why
+            // nobody knew it had never worked. `dok__Dokument.dok_MagId` is real
+            // and Subiekt populates it itself; Sfera simply gives no writable
+            // handle on it that this project has found.
+            //
+            // So this arm REPORTS and continues. Refusing the document would be
+            // worse than the mismatch it guards against: it would fail every
+            // invoice, receipt, release and order for any operator who set
+            // `stockMagazynId`, over a property that cannot be set at all. The
+            // operator is told, once per document, in terms that name what they
+            // should do instead.
+            Console.Error.WriteLine(
+                $"DocumentWarehouse: Subiekt GT's Sfera exposes no writable warehouse on a {what} " +
+                $"document, so magazyn {id} could NOT be applied - the document lands in the " +
+                "warehouse the Sfera session defaults to. Set that session default to the same " +
+                "magazyn as config.stockMagazynId, or OpenLinker will publish one warehouse's " +
+                $"stock while Subiekt releases from another. ({e.Message})");
+        }
         catch (Exception e)
         {
+            // Sfera HAS the property and refused the value - a real failure, and
+            // the dangerous one: the document would silently land elsewhere.
             throw new InvalidOperationException(
                 $"Nie udalo sie ustawic magazynu {id} na dokumencie ({what}): {e.Message}. " +
                 "Dokument zostalby wystawiony w magazynie domyslnym sesji Sfery, co rozjezdza " +

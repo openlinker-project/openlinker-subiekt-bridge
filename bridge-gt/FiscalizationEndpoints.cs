@@ -146,9 +146,12 @@ public static class FiscalizationEndpoints
                         dynamic d = mgr.DodajPAf();
                         // #3365 - a fiscal receipt moves stock like any other
                         // sale document, so it names its warehouse too.
-                        DocumentWarehouse.Apply(d, body.MagazynId, "PAf");
                         try
                         {
+                            // INSIDE the try - see the KFS site in Invoicing.cs
+                            // for why: a throw out here leaks an open Sfera
+                            // document on the single COM worker thread.
+                            DocumentWarehouse.Apply(d, body.MagazynId, "PAf");
                             d.LiczonyOdCenBrutto = true;
 
                             for (int i = 0; i < body.Lines.Count; i++)

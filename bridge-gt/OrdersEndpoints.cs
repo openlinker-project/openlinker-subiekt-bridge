@@ -266,6 +266,7 @@ public static class OrdersEndpoints
                 Uwagi = req.Uwagi ?? "",
                 Rezerwacja = false,
                 Waluta = req.Waluta ?? "",
+                MagazynId = req.MagazynId,
             };
             foreach (var line in req.Lines)
             {
@@ -439,6 +440,20 @@ public sealed class CreateOrderRequest
     /// <summary>ISO currency the line amounts are denominated in. Null/empty
     /// leaves the document on Subiekt's own default currency.</summary>
     public string? Waluta { get; set; }
+    /// <summary>#3365 - the warehouse this order will be released from.
+    ///
+    /// This property was MISSING while OpenLinker was already sending the
+    /// field: `ReadFromJsonAsync` skips unmapped members, so the value arrived
+    /// and was dropped on the floor, and `DocumentWarehouse.Apply(d,
+    /// req.MagazynId, "ZK")` in Sfera.CreateZk always saw null. The sender and
+    /// the consumer were both written; the wire shape between them was not -
+    /// the exact "reported is not enforced" gap this change set exists to
+    /// remove, one layer down.
+    ///
+    /// It matters beyond the ZK itself: EnsureWarehouseRelease builds the WZ
+    /// with NaPodstawie(zkId), so a ZK in the session's default warehouse and
+    /// a WZ naming another is the mismatch, not its absence.</summary>
+    public int? MagazynId { get; set; }
 }
 
 public sealed record CreateOrderResponse(int Id, string Numer);
