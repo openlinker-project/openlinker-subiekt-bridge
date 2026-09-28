@@ -90,8 +90,38 @@ public static class Sfera
         {
             var count = System.Threading.Interlocked.Increment(ref _recycleCount);
             Console.Error.WriteLine($"Sfera.RecycleWorker: abandoning the current worker thread + Sfera session (recycle #{count}) - a stuck COM call cannot be aborted on .NET Core.");
-            _queue.CompleteAdding();
+            var abandoned = _queue;
+            abandoned.CompleteAdding();
             _queue = new BlockingCollection<Job>();
+            // FAULT WHAT WAS QUEUED BEHIND THE STUCK CALL (PR #7 review).
+            //
+            // The old worker is by definition inside `job.Work(Session())`, so
+            // it never returns to `GetConsumingEnumerable()` and never reaches
+            // the `finally` that sets `Done`. Every job already queued behind
+            // it was therefore neither run nor signalled: each caller waited out
+            // its OWN full timeout and then called `RecycleWorker` in turn, so
+            // one stuck dialog produced N+1 recycles and N+1 abandoned
+            // threads - and a recycle triggered by a stale caller replaced
+            // whatever queue was current by then, which could be a healthy one
+            // holding a legitimate in-flight job. The cascade sustained itself
+            // while traffic continued, and `RecycleCount` climbed far faster
+            // than "one per stuck call", which is how somebody reads the counter
+            // and concludes COM is failing constantly.
+            //
+            // Draining and faulting them makes each of those callers fail at
+            // once with a reason that names the cause, instead of waiting out a
+            // timeout and recycling again.
+            var orphaned = 0;
+            foreach (var pending in abandoned.GetConsumingEnumerable())
+            {
+                pending.Error = new TimeoutException(
+                    "Abandoned by a Sfera worker recycle: an earlier COM call hung and this job " +
+                    "was still queued behind it. It never reached Subiekt.");
+                pending.Done.Set();
+                orphaned++;
+            }
+            if (orphaned > 0)
+                Console.Error.WriteLine($"Sfera.RecycleWorker: faulted {orphaned} job(s) queued behind the stuck call rather than letting each wait out its own timeout.");
             _sub = null;
             SpawnWorker();
         }
@@ -289,8 +319,12 @@ public static class Sfera
                     }
                     poz.IloscJm = line.Quantity;
                     // ADR-014: the buyer-paid amount wins over the price list.
+                    // The PAIR is what records a discount: `PrzedRabatem` is the
+                    // line as listed, `PoRabacie` what the buyer paid for it.
+                    // Equal when no discount applies, which is the whole of the
+                    // pre-#3365 behaviour.
                     poz.WartoscBruttoPrzedRabatem = line.GrossTotal;
-                    poz.WartoscBruttoPoRabacie    = line.GrossTotal;
+                    poz.WartoscBruttoPoRabacie    = line.GrossTotalAfterDiscount ?? line.GrossTotal;
                 }
 
                 if (req.NumerOryginalny != "")
@@ -566,6 +600,18 @@ public sealed class ZkLine
     public string Symbol = "";
     public decimal Quantity;
     public decimal GrossTotal;
+    /// <summary>
+    /// What the buyer actually paid for this line, when an order-level discount
+    /// applies (#3365 audit). `null` means no discount - the line is billed at
+    /// `GrossTotal` and both Sfera amounts carry it, exactly as before.
+    ///
+    /// Subiekt models a discount as the PAIR `WartoscBruttoPrzedRabatem` /
+    /// `WartoscBruttoPoRabacie`, and this bridge was setting both to the same
+    /// number - so an Allegro coupon, which reduces the order total without
+    /// touching any line price, wrote a ZK for MORE than the buyer paid, with
+    /// nothing anywhere saying so.
+    /// </summary>
+    public decimal? GrossTotalAfterDiscount;
     /// <summary>Display name for a symbol-less service line (e.g. shipping) — ignored when Symbol is set.</summary>
     public string? Name;
 }
