@@ -1,0 +1,49 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- BridgeConfig references HttpRequest for one diagnostic helper, so the
+       test project needs the web framework reference too. It does NOT host
+       anything. -->
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <!-- The bridge is a Web SDK project, whose implicit usings include
+         Microsoft.AspNetCore.Http. A test project is not, so BridgeConfig's
+         one HttpRequest reference needs it stated. -->
+    <Using Include="Microsoft.AspNetCore.Http" />
+    <Using Include="System.Linq" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.10.0" />
+    <PackageReference Include="xunit" Version="2.9.0" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <!-- The GT bridge is one flat web project whose entry point is a file of
+       top-level statements, so it cannot be referenced as a library. The few
+       files that are pure - no COM, no SQL connection - are compiled in
+       directly instead. That is the honest boundary of what can be tested
+       here: constants, string rendering, a signature, and - since the PR #7
+       second review - the pure decision functions extracted into BridgeKeys
+       (key reduction, the feed cursor, the address truth table). Everything
+       else in this bridge needs a running Subiekt. -->
+  <ItemGroup>
+    <Compile Include="../bridge-gt/DocumentTypes.cs" />
+    <Compile Include="../bridge-gt/PriceLevel.cs" />
+    <Compile Include="../bridge-gt/ImageUrlSignature.cs" />
+    <Compile Include="../bridge-gt/BridgeConfig.cs" />
+    <Compile Include="../bridge-gt/BridgeKeys.cs" />
+    <Compile Include="../bridge-gt/IdempotencyLock.cs" />
+  </ItemGroup>
+
+</Project>

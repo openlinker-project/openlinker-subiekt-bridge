@@ -1,0 +1,47 @@
+/// <summary>
+/// The one response envelope every `/api/*` route answers with.
+///
+/// Four files carried their own private copy of this helper
+/// (`InventoryEndpoints`, `OrdersEndpoints`, `ProductsEndpoints`,
+/// `FiscalizationEndpoints`), and the PR #7 review named that as the reason
+/// they will drift again: finding #11 was "these envelopes drifted apart", the
+/// fix round had to repair two of them in the same commit, and the round after
+/// added `failureMode` to all four by hand. Four separately-maintained copies
+/// of one shape is how the next field reaches three of them.
+///
+/// `failureMode` is load-bearing rather than decorative. OpenLinker reads it to
+/// decide whether a failure was TERMINAL - `'rejected'`, the provider provably
+/// created nothing - or `'in-doubt'`, where a document may exist. Getting that
+/// wrong releases the one-document-per-order guard (ADR-041 §3a) and a second
+/// fiscal document becomes possible for one sale, so the default is the safe
+/// one and a caller must opt into `'in-doubt'` explicitly.
+/// </summary>
+public static class BridgeEnvelope
+{
+    /// <summary>A successful answer: `{ success: true, data, error: null }`.</summary>
+    public static IResult Ok(object? data) =>
+        Results.Json(new { success = true, data, error = (object?)null });
+
+    /// <summary>
+    /// A failure: `{ success: false, data: null, error: { code, reason,
+    /// correlationId, failureMode } }`.
+    ///
+    /// `status` defaults to 422 because the common case is a business refusal
+    /// the caller can act on; `failureMode` defaults to `"rejected"` because
+    /// claiming a document MIGHT exist when it does not would block issuance
+    /// on every ordinary refusal.
+    /// </summary>
+    public static IResult Fail(
+        string code,
+        string reason,
+        int status = 422,
+        string failureMode = "rejected") =>
+        Results.Json(
+            new
+            {
+                success = false,
+                data = (object?)null,
+                error = new { code, reason, correlationId = (string?)null, failureMode },
+            },
+            statusCode: status);
+}

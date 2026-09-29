@@ -4,6 +4,7 @@ using SferaApi;
 using SferaApi.Models;
 using SferaApi.Validation;
 using Subiekt.Bridge.Application.Ports;
+using Subiekt.Bridge.Application.UseCases;
 using Subiekt.Bridge.Infrastructure.Sfera;
 
 namespace SferaApi.Endpoints;
@@ -136,6 +137,44 @@ public static class InvoicesEndpoints
         });
 
         // STATUS — read through the 3A IDocumentStatusReader (separate SQL connection).
+        // LOCATE — crash recovery (#3389): "did a document already get created
+        // under this OL idempotency key?", asked after a process died mid-submit.
+        // Declared BEFORE the {id:int} routes purely for readability; it cannot
+        // collide with them, since "locate" does not satisfy the :int constraint.
+        //
+        // `found: false` is a NORMAL outcome and is deliberately NOT an error
+        // envelope: the OL client unwraps a null `data` on a 2xx as a rejection,
+        // which would turn "nothing was ever created" into a thrown error on the
+        // exact path that exists to answer that question calmly.
+        app.MapGet("/api/invoices/locate", async (
+            string? key,
+            LocateInvoiceHandler handler,
+            IAuditLog auditLog,
+            CancellationToken cancellationToken) =>
+        {
+            if (string.IsNullOrWhiteSpace(key))
+                return EndpointHelpers.ValidationFailure("Query parameter 'key' is required.");
+
+            var result = await handler.HandleAsync(key, cancellationToken);
+            if (result.IsFailure)
+            {
+                await auditLog.LogAsync("LocateDokumentu", key, null, 0, result.Error.ToString());
+                return EndpointHelpers.ReadFailure(result.Error);
+            }
+
+            if (result.Value is not { } located)
+                return EndpointHelpers.Ok(new { found = false });
+
+            return EndpointHelpers.Ok(new
+            {
+                found = true,
+                providerInvoiceId = located.ProviderInvoiceId,
+                numer = located.Numer,
+                regulatoryStatus = located.RegulatoryStatus,
+                clearanceReference = located.ClearanceReference
+            });
+        });
+
         app.MapGet("/api/invoices/{id:int}/status", async (int id, IDocumentStatusReader statusReader, IAuditLog auditLog, PdfUrlSigner pdfSigner, HttpContext http) =>
         {
             var statusResult = await statusReader.GetStatusAsync(id);

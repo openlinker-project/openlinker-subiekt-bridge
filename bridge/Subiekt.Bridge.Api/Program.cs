@@ -113,6 +113,7 @@ builder.Services.AddSingleton<IAuditLog, SqliteAuditLog>();
 
 // Application use-cases.
 builder.Services.AddSingleton<UpsertCustomerHandler>();
+builder.Services.AddSingleton<LocateInvoiceHandler>();
 
 // ---------- TLS / HTTPS server cert ----------
 // When the bridge binds an https:// URL (required for any non-loopback exposure,
