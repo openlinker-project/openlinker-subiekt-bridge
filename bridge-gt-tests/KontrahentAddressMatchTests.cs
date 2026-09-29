@@ -39,3 +39,59 @@ public class KontrahentAddressMatchTests
         Assert.Equal(expected, BridgeKeys.AddressesMatch(wantKod, wantMiasto, storedKod, storedMiasto));
     }
 }
+
+/// <summary>
+/// The address-less buyer, after PR #7's second review (finding 6).
+///
+/// Such a buyer used to be accepted on the SYMBOL alone, which merges every
+/// "Jan Kowalski" onto one kontrahent and bills a fiscal document to whoever
+/// got there first. The phone decides instead - the one discriminating field
+/// OpenLinker sends - and with no phone on either side the answer is NO MATCH,
+/// so the caller creates its own record. A duplicate is recoverable; a
+/// misattributed invoice is not.
+/// </summary>
+public class AddresslessBuyerTests
+{
+    [Fact]
+    public void A_matching_phone_is_a_match()
+    {
+        Assert.True(BridgeKeys.AddresslessBuyerMatches("601234567", "601234567"));
+    }
+
+    [Theory]
+    [InlineData("+48 601 234 567", "601234567")]
+    [InlineData("601-234-567", "601234567")]
+    [InlineData("0048601234567", "+48601234567")]
+    public void Spelling_does_not_make_two_buyers_out_of_one(string want, string stored)
+    {
+        // Compared on the LAST NINE digits, and this test is why. Comparing all
+        // the digits made `+48 601 234 567` a different buyer from `601234567`
+        // - the country prefix is exactly what varies between how a marketplace
+        // sends a number and how an operator typed it years ago.
+        Assert.True(BridgeKeys.AddresslessBuyerMatches(want, stored));
+    }
+
+    [Fact]
+    public void Two_genuinely_different_numbers_are_not_collapsed_by_that_reduction()
+    {
+        // The reduction must not be so generous it merges real strangers.
+        Assert.False(BridgeKeys.AddresslessBuyerMatches("+48 601 234 567", "+48 602 000 000"));
+    }
+
+    [Fact]
+    public void A_different_phone_is_not_a_match()
+    {
+        Assert.False(BridgeKeys.AddresslessBuyerMatches("601234567", "602000000"));
+    }
+
+    [Theory]
+    [InlineData("", "601234567")]
+    [InlineData("601234567", "")]
+    [InlineData("", "")]
+    public void With_no_phone_to_compare_the_answer_is_NO_MATCH(string want, string stored)
+    {
+        // The behaviour change finding 6 asked for: prefer a duplicate over a
+        // merge on name alone.
+        Assert.False(BridgeKeys.AddresslessBuyerMatches(want, stored));
+    }
+}
