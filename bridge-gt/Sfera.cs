@@ -364,7 +364,12 @@ public static class Sfera
         return (docId, numer);
     }
 
-    /// <summary>dok_NrPelnyOryg is varchar(30) — a longer value is refused outright.</summary>
+    /// <summary>dok_NrPelnyOryg is varchar(30). This TRUNCATES - it does not refuse (PR #7 review:
+    /// the summary used to say "refused outright"). Truncation collides where a hash does not, so it is
+    /// only safe for a key whose first 30 characters already identify it. The ZK key is the OL internal
+    /// order id, `ol_order_` plus a 32-hex uuid, so 21 hex characters (84 bits) survive; do NOT feed it a
+    /// key with a shared prefix and a trailing distinguishing id (use Sfera.ReduceIdempotencyKey). The
+    /// lookup and the COM write both reduce through the same function, so store and lookup agree.</summary>
     public static string Trim30(string s) => s.Length <= 30 ? s : s.Substring(0, 30);
 
     /// <summary>#3440: reduce a long, semantically-structured OL idempotency key to

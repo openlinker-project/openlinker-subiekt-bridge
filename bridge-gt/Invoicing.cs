@@ -89,6 +89,11 @@ public static class Invoicing
     /// <summary>Idempotency pre-check: a document previously issued under this key is
     /// found by dok_NrPelnyOryg (the same 30-char field the order bridge uses for
     /// OL order ids) rather than re-issued. Real fiscal dedup, not a marker.</summary>
+    // Dedup here is PER DOCUMENT TYPE (`dok_Typ = @t`), deliberately: the type is the caller's choice,
+    // so a PA and an FS sent for one order under the same key are two different lookups and BOTH
+    // issue. "Real fiscal dedup" holds within one type only. Cross-type exclusivity (one originating
+    // document per order) is the CALLER's - OpenLinker enforces it (ADR-041 3a); a direct curl on this
+    // route does not get it from the bridge (PR #7 second-pass review).
     private static async Task<(int Id, string Numer)?> FindByIdempotencyKey(string key, int dokTyp)
     {
         if (key == "") return null;

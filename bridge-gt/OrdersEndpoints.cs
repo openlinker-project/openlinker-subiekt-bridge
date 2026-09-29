@@ -302,6 +302,9 @@ public static class OrdersEndpoints
             var zkReq = new ZkRequest
             {
                 KontrahentId = kontrahentId,
+                // Passed raw ON PURPOSE: Sfera.CreateZk applies Trim30 before the COM write, and
+                // FindExistingZk looks up with the same Trim30, so store and lookup reduce
+                // identically. Keep it that way if either side is refactored (PR #7 review).
                 NumerOryginalny = req.OrderRef,
                 Uwagi = req.Uwagi ?? "",
                 Rezerwacja = false,
@@ -336,7 +339,12 @@ public static class OrdersEndpoints
         return (r.GetInt32(0), r.GetString(1).Trim(), r.IsDBNull(2) ? 0m : r.GetDecimal(2));
     }
 
-    /// <summary>dok_NrPelnyOryg is varchar(30) - refused outright past that length.</summary>
+    /// <summary>dok_NrPelnyOryg is varchar(30). This TRUNCATES - it does not refuse (PR #7 review:
+    /// the summary used to say "refused outright"). Truncation collides where a hash does not, so it is
+    /// only safe for a key whose first 30 characters already identify it. The ZK key is the OL internal
+    /// order id, `ol_order_` plus a 32-hex uuid, so 21 hex characters (84 bits) survive; do NOT feed it a
+    /// key with a shared prefix and a trailing distinguishing id (use Sfera.ReduceIdempotencyKey). The
+    /// lookup and the COM write both reduce through the same function, so store and lookup agree.</summary>
     private static string Trim30(string s) => s.Length <= 30 ? s : s.Substring(0, 30);
 
     /// <summary>#3365 review: parse a feed cursor in EITHER form.
