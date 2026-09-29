@@ -50,7 +50,26 @@ public static class Invoicing
         _ => "none",
     };
 
-    private static string Trim30(string s) => s.Length <= 30 ? s : s.Substring(0, 30);
+    /// <summary>Cut to what `dok_NrPelnyOryg` holds. TRUNCATES - it does not
+    /// refuse, and it does not hash.
+    ///
+    /// LOAD-BEARING DEPENDENCY, recorded because nothing enforces it: this is
+    /// safe only while the ZK key is `ol_order_` plus a RANDOM uuid. That
+    /// leaves 21 hex characters inside 30, which is far more entropy than a
+    /// single installation's order count needs. It stops being safe the moment
+    /// the internal id gains a shared prefix, a timestamp head or any other
+    /// non-random leading run - two orders would then reduce to one key and the
+    /// second would be answered with the first one's ZK.
+    ///
+    /// The inventory and fiscalization keys moved to `Sfera.ReduceIdempotencyKey`
+    /// (SHA-256) precisely because theirs are composed and collide under
+    /// truncation. This one has NOT moved, deliberately: every ZK already in a
+    /// customer's Subiekt carries the truncated form in `dok_NrPelnyOryg`, so
+    /// switching the write without a probe that reads BOTH shapes would stop
+    /// finding them and mint a duplicate sales order for every retried order -
+    /// the exact defect the lookup exists to prevent. Moving it is a migration,
+    /// not an edit.</summary>
+    private static string Trim30(string s) => BridgeKeys.Trim30(s);
     private static string Trim50(string s) => s.Length <= 50 ? s : s.Substring(0, 50);
 
     /// <summary>#3440: dok_NrPelnyOryg is varchar(30), but the invoice/correction

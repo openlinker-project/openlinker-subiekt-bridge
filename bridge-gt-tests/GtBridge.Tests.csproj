@@ -33,13 +33,16 @@
        top-level statements, so it cannot be referenced as a library. The few
        files that are pure - no COM, no SQL connection - are compiled in
        directly instead. That is the honest boundary of what can be tested
-       here: constants, string rendering and a signature. Everything else in
-       this bridge needs a running Subiekt. -->
+       here: constants, string rendering, a signature, and - since the PR #7
+       second review - the pure decision functions extracted into BridgeKeys
+       (key reduction, the feed cursor, the address truth table). Everything
+       else in this bridge needs a running Subiekt. -->
   <ItemGroup>
     <Compile Include="../bridge-gt/DocumentTypes.cs" />
     <Compile Include="../bridge-gt/PriceLevel.cs" />
     <Compile Include="../bridge-gt/ImageUrlSignature.cs" />
     <Compile Include="../bridge-gt/BridgeConfig.cs" />
+    <Compile Include="../bridge-gt/BridgeKeys.cs" />
   </ItemGroup>
 
 </Project>
