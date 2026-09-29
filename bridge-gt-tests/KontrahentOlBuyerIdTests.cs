@@ -76,3 +76,43 @@ public class KontrahentOlBuyerIdTests
     private static string? ResolveColumn(string configured)
         => BridgeKeys.ResolveKontrahentOlIdColumn(configured);
 }
+
+/// <summary>
+/// The address-less carve-out, and the one caller that refuses it.
+///
+/// `MatchesAddress` itself needs a Subiekt database, so what is testable here
+/// is the DECISION it delegates - which is the whole of the third review's
+/// finding 6: the order path accepts a symbol-only match and the invoice path
+/// must not, because only one of them carries an identifier to fall back on.
+/// </summary>
+public class SymbolOnlyMatchTests
+{
+    [Fact]
+    public void The_ORDER_path_accepts_a_symbol_only_match()
+    {
+        // Refusing here mints a kontrahent on every marketplace order carrying
+        // no invoice address - the common case. Measured live as 102 then 103
+        // for one buyer upserted twice.
+        Assert.True(BridgeKeys.AcceptsSymbolOnlyMatch(phoneComparable: false, refuseSymbolOnly: false));
+    }
+
+    [Fact]
+    public void The_INVOICE_path_REFUSES_it_and_takes_the_duplicate_instead()
+    {
+        // `IssueInvoiceCommand` carries no customer id, so on an invoice with no
+        // `zkId` a symbol match is all there is - and two Jan Kowalskis would
+        // share one card on a fiscal document.
+        Assert.False(BridgeKeys.AcceptsSymbolOnlyMatch(phoneComparable: false, refuseSymbolOnly: true));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void A_comparable_phone_settles_it_for_BOTH_paths(bool refuseSymbolOnly)
+    {
+        // The refusal is a fallback for having nothing to compare, never an
+        // override of a real comparison - so a phone present on both sides
+        // answers the same way whoever is asking.
+        Assert.True(BridgeKeys.AcceptsSymbolOnlyMatch(phoneComparable: true, refuseSymbolOnly));
+    }
+}
