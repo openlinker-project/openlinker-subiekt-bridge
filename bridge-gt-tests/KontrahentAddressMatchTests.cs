@@ -88,10 +88,19 @@ public class AddresslessBuyerTests
     [InlineData("", "601234567")]
     [InlineData("601234567", "")]
     [InlineData("", "")]
-    public void With_no_phone_to_compare_the_answer_is_NO_MATCH(string want, string stored)
+    public void With_no_phone_to_compare_it_falls_back_to_the_symbol_match(string want, string stored)
     {
-        // The behaviour change finding 6 asked for: prefer a duplicate over a
-        // merge on name alone.
-        Assert.False(BridgeKeys.AddresslessBuyerMatches(want, stored));
+        // Measured live, and it overturned the first version of this rule.
+        // The reference Subiekt build has NO `Telefon` property - setting it
+        // raises "'System.__ComObject' does not contain a definition for
+        // 'Telefon'" - so no phone can be stored, so requiring one refuses
+        // every address-less buyer and mints a kontrahent per order. That is
+        // the unbounded-duplicates defect arriving by way of the fix for a
+        // rarer one.
+        //
+        // The phone therefore TIGHTENS the match where the data exists and
+        // never replaces it. Where one side has none, there is nothing to
+        // contradict and the symbol match stands.
+        Assert.True(BridgeKeys.AddresslessBuyerMatches(want, stored));
     }
 }
