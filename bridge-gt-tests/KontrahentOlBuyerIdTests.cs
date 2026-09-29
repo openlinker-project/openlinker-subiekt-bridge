@@ -93,7 +93,7 @@ public class SymbolOnlyMatchTests
         // Refusing here mints a kontrahent on every marketplace order carrying
         // no invoice address - the common case. Measured live as 102 then 103
         // for one buyer upserted twice.
-        Assert.True(BridgeKeys.AcceptsSymbolOnlyMatch(phoneComparable: false, refuseSymbolOnly: false));
+        Assert.True(BridgeKeys.AcceptsSymbolOnlyMatch(refuseSymbolOnly: false));
     }
 
     [Fact]
@@ -102,17 +102,21 @@ public class SymbolOnlyMatchTests
         // `IssueInvoiceCommand` carries no customer id, so on an invoice with no
         // `zkId` a symbol match is all there is - and two Jan Kowalskis would
         // share one card on a fiscal document.
-        Assert.False(BridgeKeys.AcceptsSymbolOnlyMatch(phoneComparable: false, refuseSymbolOnly: true));
+        Assert.False(BridgeKeys.AcceptsSymbolOnlyMatch(refuseSymbolOnly: true));
     }
 
-    [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void A_comparable_phone_settles_it_for_BOTH_paths(bool refuseSymbolOnly)
+    [Fact]
+    public void The_refusal_cannot_be_bypassed_by_anything_else()
     {
-        // The refusal is a fallback for having nothing to compare, never an
-        // override of a real comparison - so a phone present on both sides
-        // answers the same way whoever is asking.
-        Assert.True(BridgeKeys.AcceptsSymbolOnlyMatch(phoneComparable: true, refuseSymbolOnly));
+        // It took a `phoneComparable` flag whose only caller hardcoded `false`,
+        // so the accepting arm was unreachable - and it was the arm that would
+        // have overridden the invoice refusal. Presence of a phone is not
+        // agreement between two phones; the real comparison happens in
+        // MatchesAddress and never reaches here. One argument, one decision.
+        var parameters = typeof(BridgeKeys)
+            .GetMethod(nameof(BridgeKeys.AcceptsSymbolOnlyMatch))!
+            .GetParameters();
+        Assert.Single(parameters);
+        Assert.Equal("refuseSymbolOnly", parameters[0].Name);
     }
 }
