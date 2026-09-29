@@ -43,6 +43,7 @@
     <Compile Include="../bridge-gt/ImageUrlSignature.cs" />
     <Compile Include="../bridge-gt/BridgeConfig.cs" />
     <Compile Include="../bridge-gt/BridgeKeys.cs" />
+    <Compile Include="../bridge-gt/IdempotencyLock.cs" />
   </ItemGroup>
 
 </Project>
