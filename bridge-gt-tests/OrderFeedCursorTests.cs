@@ -23,6 +23,16 @@ public class OrderFeedCursorTests
     }
 
     [Fact]
+    public void A_head_cursor_is_a_feed_cursor_and_is_null_when_there_are_no_orders()
+    {
+        Assert.Null(BridgeKeys.FormatHeadCursor(null, 0));
+        var cursor = BridgeKeys.FormatHeadCursor(new DateTime(2026, 9, 29), 77);
+        Assert.Equal(BridgeKeys.FormatCursor(new DateTime(2026, 9, 29), 77), cursor);
+        Assert.True(BridgeKeys.TryParseCursor(cursor!, out _, out var id));
+        Assert.Equal(77, id);
+    }
+
+    [Fact]
     public void The_id_half_survives_the_round_trip_even_at_the_boundaries()
     {
         foreach (var id in new[] { 0, 1, int.MaxValue })
