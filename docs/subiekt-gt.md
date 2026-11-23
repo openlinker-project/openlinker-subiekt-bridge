@@ -231,6 +231,10 @@ store, with no OpenLinker-side code change:
   `GET /api/products/{symbol}`, `POST /api/products`, `PUT /api/products/{symbol}`
 - `POST /api/orders`, `GET /api/orders/feed`, `GET /api/orders/{id}`,
   `PUT /api/orders/{id}/shipping`
+- `GET /api/orders/feed/head` returns `{ "nextCursor": ... }`: the cursor of the newest ZK, or `null` when there is
+  none, in the same format as the feed's `since`. OpenLinker uses it to start order sync from "now". Added in commit
+  `4e0d21b` (branch `4265-orders-feed-head`); a bridge without it answers 404 and OpenLinker walks the whole feed
+  instead (slow on a large order list, and it refuses past 200 pages of 1000).
 - `GET /api/inventory/{towarSymbol}/stock`, `POST /api/inventory/adjust`
 - `POST /api/invoices`, `POST /api/invoices/{origId}/corrections`,
   `GET /api/invoices/{id}/status`, `GET /api/invoices/locate`
