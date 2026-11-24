@@ -231,6 +231,16 @@ store, with no OpenLinker-side code change:
   `GET /api/products/{symbol}`, `POST /api/products`, `PUT /api/products/{symbol}`
 - `POST /api/orders`, `GET /api/orders/feed`, `GET /api/orders/{id}`,
   `PUT /api/orders/{id}/shipping`
+- `GET /api/orders/feed?since=&limit=` pages ZK documents by `(issue date, document id)`. `since` is the cursor of the
+  last row already read (omit it to start at the beginning); `limit` is 1..1000 (default 50), anything else answers
+  400 `bad_request`. The response carries `nextCursor`, the last row of the page, or `null` for an empty page.
+- `GET /api/orders/feed/head` returns `{ "nextCursor": ... }`: the cursor of the newest ZK, or `null` when there is
+  none, in the same format as the feed's `since`. OpenLinker uses it to start order sync from "now". Added with the
+  order feed head (branch `4265-orders-feed-head`); the next bridge release carries it. A bridge without it answers
+  404 on `/feed/head`; OpenLinker then walks the feed within a time budget and asks the operator to upgrade the
+  bridge.
+- Date-only caveat: `dok_DataWyst` is a day, not an instant. A ZK back-dated to an earlier day, or a later edit of a
+  ZK already seen, is never re-read by the feed.
 - `GET /api/inventory/{towarSymbol}/stock`, `POST /api/inventory/adjust`
 - `POST /api/invoices`, `POST /api/invoices/{origId}/corrections`,
   `GET /api/invoices/{id}/status`, `GET /api/invoices/locate`
