@@ -74,4 +74,31 @@ public class OrderFeedCursorTests
         var day = new DateTime(2026, 9, 29);
         Assert.NotEqual(BridgeKeys.FormatCursor(day, 10), BridgeKeys.FormatCursor(day, 11));
     }
+
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(0)]
+    [InlineData(1001)]
+    public void A_limit_outside_1_to_1000_is_refused_with_a_message(int limit)
+    {
+        Assert.False(BridgeKeys.TryValidateFeedLimit(limit, out _, out var error));
+        Assert.Equal("'limit' must be between 1 and 1000.", error);
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(1000)]
+    public void A_limit_inside_the_range_is_accepted_unchanged(int limit)
+    {
+        Assert.True(BridgeKeys.TryValidateFeedLimit(limit, out var accepted, out var error));
+        Assert.Equal(limit, accepted);
+        Assert.Null(error);
+    }
+
+    [Fact]
+    public void An_absent_limit_falls_back_to_the_default_page_size()
+    {
+        Assert.True(BridgeKeys.TryValidateFeedLimit(null, out var accepted, out _));
+        Assert.Equal(50, accepted);
+    }
 }

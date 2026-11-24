@@ -341,6 +341,22 @@ Get invoice/paragon status and KSeF submission state.
 
 ---
 
+### GET /api/orders/feed
+
+Keyset page over ZK documents, ordered by (issue date, document id).
+
+- `since` (optional): cursor of the last row already read; same format as `nextCursor`.
+  An unparseable value answers 400 `bad_request`.
+- `limit` (optional, default 50): 1..1000. Anything else answers 400 `bad_request`.
+- Response `data`: items plus `nextCursor` (the last row of the page, `null` when the page is empty).
+- Caveat: the issue date is a day, so a back-dated ZK or a later edit of an already-seen ZK is never re-read.
+
+### GET /api/orders/feed/head
+
+Returns `{ "nextCursor": "<cursor>" | null }`: the cursor of the newest ZK, `null` when there is none. Same format
+as the feed's `since`, so a feed read from it starts strictly after that row. A bridge from before this route answers
+404; OpenLinker then walks the feed within a time budget and asks the operator to upgrade.
+
 ## Error Responses (structured — POC hardening)
 
 Write endpoints now return the OL contract's two error classes in a structured envelope:
